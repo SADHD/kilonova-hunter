@@ -198,3 +198,7 @@ request. GitHub fills in `.github/pull_request_template.md` when you open
 one. Describe what changed, how you tested it, and paste a plot when the
 change has one. Downloaded data and generated plots stay out of git;
 `output/` and `data/` are already ignored.
+
+## License
+
+This project is released under the [MIT License](LICENSE).
