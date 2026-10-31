@@ -14,10 +14,12 @@ physics and records, for every candidate, which rules passed and which failed.
 import pandas as pd
 
 # A candidate has to fade faster than this, in magnitudes per day.
-# 0.3 is the v1 cut. AT2017gfo faded faster than that in the r band
-# over its first week, and searches such as ZTFReST use a cut of 0.3
-# magnitudes per day to separate that kind of debris from slower
-# supernovae. Sprint 3 will apply this number as a yes-or-no check.
+# 0.3 is the v1 cut. ZTFReST applies it in any one of the g, r, or i
+# filters, not in r alone: fading at least this fast in one of those
+# bands keeps the candidate. How fast AT2017gfo itself faded is
+# approximate, including near the start, and still to be confirmed by
+# the science lead against the 2017 photometry. Sprint 3 will apply
+# this number as a yes-or-no check.
 FADE_FASTER_THAN_MAG_PER_DAY = 0.3
 
 
