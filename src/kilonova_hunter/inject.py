@@ -19,6 +19,19 @@ PEAK_DAY = 1.0
 # modest error bar is.
 NOISE_MAG = 0.05
 
+# How fast the demo fades in the r band after the peak, in magnitudes
+# per day. A larger number means the object gets fainter faster.
+#
+# 0.4 sits a comfortable step above the v1 rule of "faster than 0.3
+# magnitudes per day". AT2017gfo, the kilonova that came with the
+# neutron-star merger GW170817, faded faster than that in r over its
+# first week (about a magnitude per day near the start). Published
+# searches such as ZTFReST use the same idea: keep a candidate that
+# fades at least 0.3 magnitudes per day, and set aside slower
+# supernovae. The g band below is a little faster than this r value,
+# so g minus r still grows and the source turns red.
+R_FADE_PER_DAY = 0.40
+
 # peak_mag is the brightness at PEAK_DAY, before noise.
 # rise_per_day and fade_per_day are positive magnitudes of fading per day
 # on either side of the peak (the object is fainter as you move away).
@@ -26,7 +39,7 @@ NOISE_MAG = 0.05
 # time and the object looks redder. That reddening is the cooling debris.
 _FILTERS: dict[str, dict[str, float]] = {
     "g": {"peak_mag": 19.0, "rise_per_day": 1.0, "fade_per_day": 0.50},
-    "r": {"peak_mag": 19.6, "rise_per_day": 1.3, "fade_per_day": 0.15},
+    "r": {"peak_mag": 19.6, "rise_per_day": 1.3, "fade_per_day": R_FADE_PER_DAY},
 }
 
 
