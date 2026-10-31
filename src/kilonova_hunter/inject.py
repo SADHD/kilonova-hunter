@@ -19,14 +19,39 @@ PEAK_DAY = 1.0
 # modest error bar is.
 NOISE_MAG = 0.05
 
-# peak_mag is the brightness at PEAK_DAY, before noise.
+# How fast the demo fades in the r band after the peak, in magnitudes
+# per day. A larger number means the object gets fainter faster.
+#
+# 0.45 clears the v1 rule of faster than 0.3 mag/day, and it also sits
+# above the stricter r-band cut of about 0.39 mag/day from the ZTFReST
+# model grid (Andreoni et al. 2020, quoted in arXiv:2104.06352). The gap
+# above 0.39 leaves room for noise, so a noisy slope fitted to this
+# curve can still come out faster than that cut. How fast AT2017gfo
+# itself faded is approximate, and still to be confirmed by the science
+# lead against the 2017 photometry.
+R_FADE_PER_DAY = 0.45
+
+# How fast the demo fades in the g band after the peak, in magnitudes
+# per day. This is faster than the r band, so g minus r grows and the
+# object turns red.
+#
+# Those same ZTFReST model cuts expect g to fade faster than r: about
+# 0.57 mag/day in g against about 0.39 in r. A GW170817-like kilonova
+# goes from blue to red within about 1 to 2 days, so this toy uses 0.9,
+# inside the 0.8 to 1.0 range, and starts only slightly blue. The day
+# the color crosses to red is approximate, pending the science lead's
+# check against AT2017gfo photometry.
+G_FADE_PER_DAY = 0.90
+
+# peak_mag is the brightness at PEAK_DAY, before noise. g peaks 0.1 mag
+# brighter than r, so g minus r is slightly negative there (slightly blue).
 # rise_per_day and fade_per_day are positive magnitudes of fading per day
 # on either side of the peak (the object is fainter as you move away).
-# g is a bluer filter and fades faster than r, so g minus r grows with
-# time and the object looks redder. That reddening is the cooling debris.
+# g fades faster than r, so g minus r grows and the object turns red.
+# That reddening is the cooling debris.
 _FILTERS: dict[str, dict[str, float]] = {
-    "g": {"peak_mag": 19.0, "rise_per_day": 1.0, "fade_per_day": 0.50},
-    "r": {"peak_mag": 19.6, "rise_per_day": 1.3, "fade_per_day": 0.15},
+    "g": {"peak_mag": 19.5, "rise_per_day": 1.0, "fade_per_day": G_FADE_PER_DAY},
+    "r": {"peak_mag": 19.6, "rise_per_day": 1.3, "fade_per_day": R_FADE_PER_DAY},
 }
 
 
@@ -65,10 +90,13 @@ def simulate_kilonova_light_curve(
 ) -> pd.DataFrame:
     """Build a made-up kilonova light curve in the g and r filters.
 
-    The curve brightens for about a day, fades for about a week, and turns
-    redder as the g filter fades faster than r. The same ``seed`` always
-    produces the same noise, so a plot you make today matches a plot you
-    make tomorrow.
+    The curve brightens for about a day and fades for about a week. At the
+    peak, g minus r is slightly negative (a bit blue). g then fades faster
+    than r, so the color turns red. On this toy curve that crossing falls
+    about one to two days after the explosion. The crossing day is
+    approximate, pending the science lead's check against AT2017gfo
+    photometry. The same ``seed`` always produces the same noise, so a plot
+    you make today matches a plot you make tomorrow.
 
     Args:
         duration_days: How long to follow the object, counting from the explosion.
