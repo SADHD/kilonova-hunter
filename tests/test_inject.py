@@ -5,9 +5,14 @@ Magnitudes are backwards from everyday charts: a bigger number is fainter.
 (that minimum is the brightest moment) and climbs afterward.
 """
 
+import numpy as np
 import pandas as pd
 
-from kilonova_hunter.inject import simulate_kilonova_light_curve
+from kilonova_hunter.inject import (
+    _FILTERS,
+    _brightness_without_noise,
+    simulate_kilonova_light_curve,
+)
 
 
 def _brightest_time(group: pd.DataFrame) -> float:
@@ -23,19 +28,40 @@ def test_light_curve_has_both_filters() -> None:
     assert len(curve) > 4
 
 
+def test_noise_free_curve_peaks_at_one_day() -> None:
+    """Without noise, both filters are brightest exactly one day after the explosion.
+
+    The public light curve adds random scatter on top of this shape. On the
+    r filter the fade just after day 1 is small, only a little larger than
+    that scatter, so the brightest noisy point sometimes lands at day 1.5
+    and, less often, at day 2. Checking the smooth curve keeps this test
+    about the shape we designed, not about one lucky random seed.
+    """
+    # Same half-day spacing the demo uses, and long enough to see the week-long fade.
+    times = np.arange(0.0, 10.0 + 1e-9, 0.5)
+    for filter_name, params in _FILTERS.items():
+        magnitudes = _brightness_without_noise(
+            times,
+            peak_mag=params["peak_mag"],
+            rise_per_day=params["rise_per_day"],
+            fade_per_day=params["fade_per_day"],
+        )
+        # A smaller magnitude is brighter, so the peak is the minimum.
+        peak_time = float(times[int(np.argmin(magnitudes))])
+        assert peak_time == 1.0, filter_name
+
+
 def test_light_curve_peaks_then_fades() -> None:
-    """Each filter brightens toward day 1, then fades over the rest of the week."""
+    """Each noisy filter is fainter at the start and fainter a week later.
+
+    The exact day of the brightest noisy point is allowed to slip by a sample.
+    ``test_noise_free_curve_peaks_at_one_day`` is the one that pins day 1.
+    """
     curve = simulate_kilonova_light_curve()
     for filter_name, group in curve.groupby("filter"):
         group = group.sort_values("time_days")
         peak_time = _brightest_time(group)
-        # The grid is every half day, so "about one day" means the peak
-        # sample itself, not merely somewhere in the first week.
-        assert peak_time == 1.0, filter_name
-
-        brightest = float(
-            group.loc[group["time_days"] == peak_time, "magnitude"].iloc[0]
-        )
+        brightest = float(group["magnitude"].min())
         first = float(group.iloc[0]["magnitude"])
         last = float(group.iloc[-1]["magnitude"])
         # The rise and the fade are both large compared with the 0.05 mag noise.
