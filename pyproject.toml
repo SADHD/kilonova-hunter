@@ -3,6 +3,8 @@ name = "kilonova-hunter"
 version = "0.1.0"
 description = "Search Rubin Observatory alerts for kilonova candidates and explain each verdict."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Sage Dombrowski", email = "139999736+SADHD@users.noreply.github.com" },
 ]
