@@ -8,8 +8,10 @@ Magnitudes are backwards from everyday charts: a bigger number is fainter.
 import numpy as np
 import pandas as pd
 
+from kilonova_hunter.filter import FADE_FASTER_THAN_MAG_PER_DAY
 from kilonova_hunter.inject import (
     _FILTERS,
+    PEAK_DAY,
     _brightness_without_noise,
     simulate_kilonova_light_curve,
 )
@@ -19,6 +21,17 @@ def _brightest_time(group: pd.DataFrame) -> float:
     """Return the time of the smallest magnitude in one filter."""
     row = group.loc[group["magnitude"].idxmin()]
     return float(row["time_days"])
+
+
+def _smooth_magnitudes(filter_name: str, times: np.ndarray) -> np.ndarray:
+    """Return one filter's magnitudes with the random scatter left off."""
+    params = _FILTERS[filter_name]
+    return _brightness_without_noise(
+        times,
+        peak_mag=params["peak_mag"],
+        rise_per_day=params["rise_per_day"],
+        fade_per_day=params["fade_per_day"],
+    )
 
 
 def test_light_curve_has_both_filters() -> None:
@@ -31,24 +44,17 @@ def test_light_curve_has_both_filters() -> None:
 def test_noise_free_curve_peaks_at_one_day() -> None:
     """Without noise, both filters are brightest exactly one day after the explosion.
 
-    The public light curve adds random scatter on top of this shape. On the
-    r filter the fade just after day 1 is small, only a little larger than
-    that scatter, so the brightest noisy point sometimes lands at day 1.5
-    and, less often, at day 2. Checking the smooth curve keeps this test
-    about the shape we designed, not about one lucky random seed.
+    The public light curve adds random scatter on top of this shape. Checking
+    the smooth curve keeps this test about the shape we designed, not about
+    one particular random seed.
     """
     # Same half-day spacing the demo uses, and long enough to see the week-long fade.
     times = np.arange(0.0, 10.0 + 1e-9, 0.5)
-    for filter_name, params in _FILTERS.items():
-        magnitudes = _brightness_without_noise(
-            times,
-            peak_mag=params["peak_mag"],
-            rise_per_day=params["rise_per_day"],
-            fade_per_day=params["fade_per_day"],
-        )
+    for filter_name in _FILTERS:
+        magnitudes = _smooth_magnitudes(filter_name, times)
         # A smaller magnitude is brighter, so the peak is the minimum.
         peak_time = float(times[int(np.argmin(magnitudes))])
-        assert peak_time == 1.0, filter_name
+        assert peak_time == PEAK_DAY, filter_name
 
 
 def test_light_curve_peaks_then_fades() -> None:
@@ -73,24 +79,50 @@ def test_light_curve_peaks_then_fades() -> None:
         assert float(later.iloc[-1]) > float(later.iloc[0])
 
 
-def test_color_turns_redder() -> None:
-    """g minus r is larger at the end of the week than at the start.
+def test_color_turns_redder_after_peak() -> None:
+    """After the peak, the smooth curve goes from slightly blue to red.
 
-    A growing g - r means the bluer filter has become faint compared with
-    the redder one, which is the cooling the filter will eventually look for.
+    g minus r below zero means g is brighter, which is a blue color. The
+    peak is blue, the next sample is already redder than the peak, and by
+    day 3 the color is red (g minus r above zero). Every later step keeps
+    climbing. The noise is left off, so this follows the fade rates rather
+    than one random seed.
+
+    The day the color crosses zero is approximate. It still needs the
+    science lead's check against AT2017gfo photometry.
     """
-    curve = simulate_kilonova_light_curve()
+    # The demo's half-day grid, from the peak through the rest of the week.
+    times = np.arange(PEAK_DAY, 10.0 + 1e-9, 0.5)
+    color = _smooth_magnitudes("g", times) - _smooth_magnitudes("r", times)
+    at_peak = float(color[0])
+    # The very next sample, half a day later, is "slightly later".
+    slightly_later = float(color[1])
+    at_day_3 = float(color[np.nonzero(np.isclose(times, 3.0))[0][0]])
 
-    def color_at(day: float) -> float:
-        """Return g magnitude minus r magnitude at one timestamp."""
-        magnitudes = {}
-        for filter_name in ("g", "r"):
-            group = curve[curve["filter"] == filter_name]
-            row = group.loc[group["time_days"] == day].iloc[0]
-            magnitudes[filter_name] = float(row["magnitude"])
-        return magnitudes["g"] - magnitudes["r"]
+    assert at_peak < 0.0
+    assert at_peak < slightly_later
+    assert at_day_3 > 0.0
+    # Each later sample is redder than the one just before it.
+    assert np.all(np.diff(color) > 0.0)
 
-    assert color_at(8.0) > color_at(1.0) > color_at(0.0)
+
+def test_noise_free_r_fade_beats_the_filter_cut() -> None:
+    """The smooth r curve fades faster than the v1 filter's cut.
+
+    The rate is how far the magnitude climbs over the first few days after
+    the peak, with the noise left off. A larger magnitude is fainter, so a
+    bigger rate is a faster fade. The cut is the named constant the filter
+    will use, so this test and that rule cannot drift apart.
+    """
+    # Three days is "the first few days" after the peak, which is the
+    # stretch this demo's fade rate is meant to describe.
+    times = np.arange(PEAK_DAY, PEAK_DAY + 3.0 + 1e-9, 0.5)
+    magnitudes = _smooth_magnitudes("r", times)
+    fade_per_day = float(magnitudes[-1] - magnitudes[0]) / float(times[-1] - times[0])
+    assert fade_per_day > FADE_FASTER_THAN_MAG_PER_DAY, (
+        f"r faded {fade_per_day:.3f} mag/day, "
+        f"which is not faster than {FADE_FASTER_THAN_MAG_PER_DAY}"
+    )
 
 
 def test_same_seed_redraws_the_same_curve() -> None:
