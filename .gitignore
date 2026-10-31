@@ -8,3 +8,18 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Plots and downloaded alerts the tool writes while you work.
+# The sample figure in docs/ is committed on purpose; these folders are not.
+output/
+data/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# macOS folder metadata
+.DS_Store

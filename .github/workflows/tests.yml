@@ -1,0 +1,37 @@
+# Runs on every pull request. A failure here means the branch is not ready
+# to merge: either Ruff found a problem, or a test no longer passes.
+name: Tests
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    name: Ruff and pytest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        # uv installs the Python version named in .python-version, then
+        # the libraries locked in uv.lock. enable-cache reuses downloads
+        # between runs so this step stays short.
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install the project
+        # --locked refuses to run if uv.lock does not match pyproject.toml,
+        # so a forgotten lockfile update fails here instead of silently
+        # installing different versions.
+        run: uv sync --locked
+
+      - name: Check for mistakes with Ruff
+        run: uv run ruff check
+
+      - name: Check formatting with Ruff
+        run: uv run ruff format --check
+
+      - name: Run tests
+        run: uv run pytest
