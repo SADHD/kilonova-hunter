@@ -1,17 +1,44 @@
 [project]
 name = "kilonova-hunter"
 version = "0.1.0"
-description = "Add your description here"
+description = "Search Rubin Observatory alerts for kilonova candidates and explain each verdict."
 readme = "README.md"
 authors = [
-    { name = "Sage Dombrowski", email = "139999736+SADHD@users.noreply.github.com" }
+    { name = "Sage Dombrowski", email = "139999736+SADHD@users.noreply.github.com" },
 ]
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "astropy",
+    "matplotlib",
+    "numpy",
+    "pandas",
+]
 
 [project.scripts]
-kilonova-hunter = "kilonova_hunter:main"
+kilohunt = "kilonova_hunter.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
 
 [build-system]
-requires = ["uv_build>=0.12.18,<0.13.0"]
+requires = ["uv_build>=0.13.6,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests", "notebooks"]
+
+[tool.ruff.lint]
+# E and F catch real mistakes. I sorts imports. UP modernizes syntax.
+# B flags a few easy-to-miss bugs, such as a mutable default argument.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kilonova_hunter"]
