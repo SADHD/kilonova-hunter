@@ -80,18 +80,28 @@ def test_light_curve_peaks_then_fades() -> None:
 
 
 def test_color_turns_redder_after_peak() -> None:
-    """After the peak, g minus r grows on the smooth curve.
+    """After the peak, the smooth curve goes from slightly blue to red.
 
-    A larger g minus r means the bluer filter has become faint compared
-    with the redder one. The check walks every step after the peak with
-    the noise left off, so it follows the fade rates themselves. It does
-    not pin the day the color crosses zero: a faster r fade moves that
-    crossing later, and one noisy seed could nudge a close pair of points
-    the wrong way.
+    g minus r below zero means g is brighter, which is a blue color. The
+    peak is blue, the next sample is already redder than the peak, and by
+    day 3 the color is red (g minus r above zero). Every later step keeps
+    climbing. The noise is left off, so this follows the fade rates rather
+    than one random seed.
+
+    The day the color crosses zero is approximate. It still needs the
+    science lead's check against AT2017gfo photometry.
     """
-    # From the peak through the rest of the demo, on the demo's half-day grid.
+    # The demo's half-day grid, from the peak through the rest of the week.
     times = np.arange(PEAK_DAY, 10.0 + 1e-9, 0.5)
     color = _smooth_magnitudes("g", times) - _smooth_magnitudes("r", times)
+    at_peak = float(color[0])
+    # The very next sample, half a day later, is "slightly later".
+    slightly_later = float(color[1])
+    at_day_3 = float(color[np.nonzero(np.isclose(times, 3.0))[0][0]])
+
+    assert at_peak < 0.0
+    assert at_peak < slightly_later
+    assert at_day_3 > 0.0
     # Each later sample is redder than the one just before it.
     assert np.all(np.diff(color) > 0.0)
 
@@ -104,8 +114,8 @@ def test_noise_free_r_fade_beats_the_filter_cut() -> None:
     bigger rate is a faster fade. The cut is the named constant the filter
     will use, so this test and that rule cannot drift apart.
     """
-    # Three days is long enough to be "the first few days" and short enough
-    # to stay in the stretch AT2017gfo was fast in r.
+    # Three days is "the first few days" after the peak, which is the
+    # stretch this demo's fade rate is meant to describe.
     times = np.arange(PEAK_DAY, PEAK_DAY + 3.0 + 1e-9, 0.5)
     magnitudes = _smooth_magnitudes("r", times)
     fade_per_day = float(magnitudes[-1] - magnitudes[0]) / float(times[-1] - times[0])
