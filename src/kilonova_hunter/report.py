@@ -11,35 +11,29 @@ sentence per rule, arrives with the filter in Sprint 3.
 from pathlib import Path
 
 import pandas as pd
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 # Colors astronomers often use for these bands, so g reads as the bluer,
 # greener filter and r as the redder one.
 _FILTER_COLORS = {"g": "#2ca02c", "r": "#d62728"}
 
-# Held onto after the first plot. Switching Matplotlib's backend has to
-# happen before pyplot is imported, and importing it twice would warn.
-_pyplot = None
-
 _REQUIRED_COLUMNS = ("time_days", "filter", "magnitude")
 
 
-def _load_pyplot():
-    """Import pyplot set up to draw into a file.
+def _figure_for_a_file() -> Figure:
+    """Create one figure that can be saved without opening a window.
 
-    Matplotlib's usual backend tries to open a window. Tests and GitHub
-    Actions have no window to open, so we select Agg, which only writes
-    image files. The selection has to happen before pyplot is imported,
-    which is why this import lives inside a function.
+    Matplotlib's usual plotting tools share one global backend. Calling
+    ``matplotlib.use("Agg")`` would switch that backend for the whole
+    program, and a notebook's inline plots would stop working. This figure
+    gets its own Agg canvas, which only affects the file we are about to write.
     """
-    global _pyplot
-    if _pyplot is None:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        _pyplot = plt
-    return _pyplot
+    figure = Figure(figsize=(7.0, 4.5))
+    # The canvas attaches itself to the figure. savefig needs that attachment
+    # to turn the drawing into image pixels.
+    FigureCanvasAgg(figure)
+    return figure
 
 
 def plot_light_curve(
@@ -83,8 +77,8 @@ def plot_light_curve(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    plt = _load_pyplot()
-    figure, axes = plt.subplots(figsize=(7.0, 4.5))
+    figure = _figure_for_a_file()
+    axes = figure.add_subplot()
     # sort=True makes the legend order stable (g then r) across machines.
     for filter_name, group in light_curve.groupby("filter", sort=True):
         group = group.sort_values("time_days")
@@ -110,8 +104,6 @@ def plot_light_curve(
     axes.grid(True, alpha=0.3)
     figure.tight_layout()
     figure.savefig(output, dpi=120)
-    # Close the figure so a loop of plots does not keep them all in memory.
-    plt.close(figure)
     return output
 
 

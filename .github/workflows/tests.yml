@@ -1,8 +1,11 @@
-# Runs on every pull request. A failure here means the branch is not ready
-# to merge: either Ruff found a problem, or a test no longer passes.
+# Runs on every pull request, and again when commits land on main.
+# A failure means Ruff found a problem, or a test no longer passes.
 name: Tests
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
 
 jobs:
