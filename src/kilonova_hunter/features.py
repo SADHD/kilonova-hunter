@@ -186,10 +186,18 @@ def peak_time_days(light_curve: pd.DataFrame, band: str) -> float | None:
     points = _usable_points(light_curve, band)
     if points.empty:
         return None
-    # sort puts the earliest row first, so a tie keeps the earlier time.
+    # Sort by time so that, if two points are equally bright, the earlier
+    # one comes first. argmin keeps the first minimum it sees, so that
+    # earlier time is the one we return.
+    #
+    # Use the row's position, not its label. A label is only a name.
+    # Sticking two tables together without resetting the index can give
+    # two different rows the same name, and looking that name up would
+    # hand back both rows.
     ordered = points.sort_values("time_days")
-    brightest = ordered["magnitude"].idxmin()
-    return float(ordered.loc[brightest, "time_days"])
+    magnitudes = ordered["magnitude"].to_numpy(dtype=float)
+    brightest_position = int(np.argmin(magnitudes))
+    return float(ordered["time_days"].iloc[brightest_position])
 
 
 def measure_features(light_curves: pd.DataFrame) -> pd.DataFrame:
@@ -238,13 +246,16 @@ def _fade_rate_for_one_band(
             ),
         )
 
-    after_peak = _usable_points(points, band)
+    # Every point in this band that has a time and a magnitude, including
+    # the rise before the peak. The next lines keep the peak and the
+    # points after it that fall inside the fade window.
+    usable_points = _usable_points(points, band)
     window_end = peak_time + window_days
     # A tiny margin keeps the peak, and the point exactly at the end of
     # the window, when floating-point rounding nudges a time.
-    in_window = after_peak.loc[
-        (after_peak["time_days"] >= peak_time - _SAME_VISIT_DAYS)
-        & (after_peak["time_days"] <= window_end + _SAME_VISIT_DAYS)
+    in_window = usable_points.loc[
+        (usable_points["time_days"] >= peak_time - _SAME_VISIT_DAYS)
+        & (usable_points["time_days"] <= window_end + _SAME_VISIT_DAYS)
     ]
     times = in_window["time_days"].to_numpy(dtype=float)
     magnitudes = in_window["magnitude"].to_numpy(dtype=float)
