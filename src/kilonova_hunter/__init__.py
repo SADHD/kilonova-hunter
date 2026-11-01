@@ -5,6 +5,7 @@ and hands data to the next stage:
 
     fetch → clean → features → filter → report
 
+``config`` holds the rule thresholds, in one place.
 ``inject`` builds fake kilonovae so the filter can be scored.
 ``tns`` looks up confirmed types on the Transient Name Server.
 ``cli`` is the ``kilohunt`` command, and the only module that talks to a person.
