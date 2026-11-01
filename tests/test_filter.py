@@ -142,6 +142,23 @@ def test_blue_source_fails_the_color_rule() -> None:
     )
 
 
+def test_empty_light_curve_says_not_enough_data() -> None:
+    """Zero rows is an empty night, not a crash.
+
+    Both rules fail, and each sentence says there was not enough data.
+    """
+    empty = pd.DataFrame(
+        columns=["time_days", "filter", "magnitude", "magnitude_error"]
+    )
+    assert len(empty) == 0
+    verdict = is_kilonova_candidate(empty)
+    assert not verdict.is_candidate
+    assert not verdict.fade.passed
+    assert not verdict.color.passed
+    assert "not enough data" in verdict.fade.explanation.lower()
+    assert "not enough data" in verdict.color.explanation.lower()
+
+
 def test_too_few_points_says_not_enough_data() -> None:
     """One point per band cannot support either rule, and it must not crash."""
     verdict = is_kilonova_candidate(_one_point_each())

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from kilonova_hunter.features import fade_rates, g_minus_r_at_time
+from kilonova_hunter.features import fade_rates, g_minus_r_at_time, peak_time_days
 from kilonova_hunter.inject import (
     G_FADE_PER_DAY,
     R_FADE_PER_DAY,
@@ -59,6 +59,34 @@ def test_noise_free_demo_fade_matches_the_built_in_rates() -> None:
     rates = fade_rates(curve)
     assert rates["g"].mag_per_day == pytest.approx(G_FADE_PER_DAY)
     assert rates["r"].mag_per_day == pytest.approx(R_FADE_PER_DAY)
+
+
+def test_duplicate_index_labels_still_find_one_brightest_row() -> None:
+    """Two tables stuck together can reuse the same row labels.
+
+    The brightest g point is day 1 (magnitude 20). Day 3 is fainter, but
+    it carries the same label as day 1, because the two tables were
+    concatenated without building a fresh index. A lookup by label would
+    return both rows. The fade after day 1 is 1 magnitude per day.
+    """
+    early = pd.DataFrame(
+        {
+            "time_days": [0.0, 1.0],
+            "filter": ["g", "g"],
+            "magnitude": [21.0, 20.0],
+        }
+    )
+    later = pd.DataFrame(
+        {
+            "time_days": [2.0, 3.0],
+            "filter": ["g", "g"],
+            "magnitude": [21.0, 22.0],
+        }
+    )
+    curve = pd.concat([early, later])
+    assert curve.index.duplicated().any()
+    assert peak_time_days(curve, "g") == pytest.approx(1.0)
+    assert fade_rates(curve)["g"].mag_per_day == pytest.approx(1.0)
 
 
 def test_one_point_has_no_fade_rate() -> None:
