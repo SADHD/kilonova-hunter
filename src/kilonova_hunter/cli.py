@@ -11,6 +11,7 @@ CSV of one light curve and prints the verdict.
 
 import argparse
 import sys
+from collections.abc import Iterator
 from dataclasses import fields
 from pathlib import Path
 from typing import NoReturn
@@ -190,31 +191,20 @@ def _format_verdict(verdict: CandidateVerdict) -> str:
     return "\n".join(lines)
 
 
-def _iter_rule_results(verdict: CandidateVerdict):
+def _iter_rule_results(
+    verdict: CandidateVerdict,
+) -> Iterator[tuple[str, RuleResult]]:
     """Yield ``(field_name, rule_result)`` for every rule on a verdict.
 
-    A rule is one field that carries a sentence and a pass/fail flag,
-    the way ``RuleResult`` does. ``is_candidate`` is a single yes-or-no
-    for the whole object, so this loop leaves it out. The field name is
-    the rule's name. Walking the fields, instead of writing "fade" and
-    "color" here, means a third rule shows up on its own.
+    A rule is a field whose value is a ``RuleResult``. ``is_candidate``
+    is a bool, so this loop leaves it out. The field name is the rule's
+    name. Walking the fields, instead of writing "fade" and "color"
+    here, means a third rule shows up on its own.
     """
     for field in fields(verdict):
         value = getattr(verdict, field.name)
-        if _is_rule_result(value):
+        if isinstance(value, RuleResult):
             yield field.name, value
-
-
-def _is_rule_result(value: object) -> bool:
-    """True when this value is one rule's answer and its sentence.
-
-    The test is "does it look like a rule result?", not "is it exactly
-    the fade field?". A sentence plus a ``passed`` flag is enough. A
-    rule that was skipped still counts: it has a sentence too.
-    """
-    if not isinstance(getattr(value, "explanation", None), str):
-        return False
-    return hasattr(value, "passed") or bool(getattr(value, "skipped", False))
 
 
 def _rule_status(result: RuleResult) -> str:
@@ -247,10 +237,11 @@ def _read_light_curve_csv(path: Path) -> pd.DataFrame:
         are left as they are; the filter ignores what it does not use.
 
     Raises:
-        SystemExit: If the path is missing, not a readable CSV, or
-            missing a required column. The exit code is 1, and the
-            reason is printed to standard error (the channel for
-            problems, so it does not get mixed into the verdict).
+        SystemExit: If the path is missing, not a readable CSV, missing
+            a required column, or has text in ``time_days`` or
+            ``magnitude``. The exit code is 1, and the reason is printed
+            to standard error (the channel for problems, so it does not
+            get mixed into the verdict).
     """
     if not path.exists():
         _fail(f"Could not check {path}: that file does not exist.")
@@ -284,7 +275,41 @@ def _read_light_curve_csv(path: Path) -> pd.DataFrame:
             "(a larger number is fainter), and magnitude_error is the "
             "uncertainty on that brightness."
         )
+    _require_numeric_columns(table, path)
     return table
+
+
+def _require_numeric_columns(table: pd.DataFrame, path: Path) -> None:
+    """Exit if time or brightness cannot be read as a number.
+
+    The filter fits a straight line to ``time_days`` and ``magnitude``.
+    A word such as "bright" used to crash that fit with a traceback.
+    A blank cell is different: it is a missing measurement, and the
+    filter already skips those. Only text that is not a number is
+    reported here.
+    """
+    problems: list[str] = []
+    for column in ("time_days", "magnitude"):
+        # errors="coerce" turns text into missing, and leaves real
+        # numbers alone. A cell that was already blank stays missing
+        # on both sides, so it is not counted as text.
+        numeric = pd.to_numeric(table[column], errors="coerce")
+        bad = table.loc[numeric.isna() & table[column].notna(), column]
+        if not bad.empty:
+            sample = bad.iloc[0]
+            problems.append(f"{column} (for example {sample!r})")
+    if not problems:
+        return
+    if len(problems) == 1:
+        joined = f"{problems[0]} must be a number, not text."
+    else:
+        joined = f"{' and '.join(problems)} must be numbers, not text."
+    _fail(
+        f"Could not check {path}: {joined} "
+        "time_days is days since a reference time, and magnitude is the "
+        "brightness (a larger number is fainter). A blank cell is fine. "
+        "A word is not."
+    )
 
 
 def _write_light_curve_csv(light_curve: pd.DataFrame, path: Path) -> None:
@@ -295,9 +320,14 @@ def _write_light_curve_csv(light_curve: pd.DataFrame, path: Path) -> None:
     a nameless first column that is easy to mistake for the time.
     Parent folders are created, the same way the plot helper does, so
     ``--save-csv output/curve.csv`` works before ``output/`` exists.
+
+    Numbers are written with four digits after the decimal. That is
+    much finer than the 0.01 magnitudes the verdict sentences show, and
+    it avoids a long tail of binary rounding such as
+    ``20.900000000000002``.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    light_curve.to_csv(path, index=False)
+    light_curve.to_csv(path, index=False, float_format="%.4f")
 
 
 def _fail(message: str) -> NoReturn:
