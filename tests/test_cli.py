@@ -65,6 +65,7 @@ def test_demo_prints_the_noise_free_verdict(
     assert verdict_text.strip().splitlines()[0] == "CANDIDATE"
     assert verdict.fade.explanation in verdict_text
     assert verdict.color.explanation in verdict_text
+    assert verdict.reddening.explanation in verdict_text
     assert destination.is_file()
 
 
@@ -91,8 +92,9 @@ def test_check_noise_free_demo_is_a_candidate(
     """The made-up kilonova, with the noise left off, is a CANDIDATE.
 
     The file is the same table ``simulate_kilonova_light_curve`` returns.
-    Both rules' sentences are in the printout, which is how we know the
-    command walked every rule instead of printing only the first line.
+    Every rule's sentence is in the printout, which is how we know the
+    command walked the verdict instead of printing only the first line.
+    On this curve reddening passes, so the line is PASS, not SKIPPED.
     """
     curve = simulate_kilonova_light_curve(noise_mag=0.0)
     path = tmp_path / "demo.csv"
@@ -106,6 +108,7 @@ def test_check_noise_free_demo_is_a_candidate(
     assert printed.splitlines()[0] == "CANDIDATE"
     assert f"Fade: PASS. {verdict.fade.explanation}" in printed
     assert f"Color: PASS. {verdict.color.explanation}" in printed
+    assert f"Reddening: PASS. {verdict.reddening.explanation}" in printed
     assert captured.err == ""
 
 
@@ -234,12 +237,13 @@ def test_check_missing_columns_exits_nonzero(
 
 
 def test_verdict_text_lists_every_rule_including_a_skipped_one() -> None:
-    """The printer walks the verdict's rules instead of naming two of them.
+    """The printer walks every rule, and a skip is ``passed`` set to None.
 
-    Reddening is not a filter rule yet. This stand-in puts it on the
-    verdict anyway, once as ``skipped=True`` and once with ``passed``
-    left empty. Both have to print SKIPPED. The overall line stays
-    whatever ``is_candidate`` says, even if a skipped rule did not pass.
+    There is no separate skipped flag. Reddening uses ``None`` when it
+    cannot compare two colors. An extra rule on this stand-in uses
+    ``None`` too, so the loop is not a hard-coded list of three names.
+    The first line stays ``CANDIDATE`` because ``is_candidate`` is true.
+    A skip does not block that.
     """
 
     @dataclass
@@ -255,9 +259,8 @@ def test_verdict_text_lists_every_rule_including_a_skipped_one() -> None:
         fade=RuleResult(passed=True, explanation="The fade rule passes."),
         color=RuleResult(passed=True, explanation="The color rule passes."),
         reddening=RuleResult(
-            passed=False,
-            skipped=True,
-            explanation="Reddening was skipped because the bands were too far apart.",
+            passed=None,
+            explanation="Reddening was skipped because there was only one color.",
         ),
         not_applied=RuleResult(
             passed=None,
@@ -266,8 +269,7 @@ def test_verdict_text_lists_every_rule_including_a_skipped_one() -> None:
     )
     lines = _format_verdict(verdict).splitlines()
     reddening_line = (
-        "Reddening: SKIPPED. "
-        "Reddening was skipped because the bands were too far apart."
+        "Reddening: SKIPPED. Reddening was skipped because there was only one color."
     )
     assert lines == [
         "CANDIDATE",
@@ -276,6 +278,40 @@ def test_verdict_text_lists_every_rule_including_a_skipped_one() -> None:
         reddening_line,
         "Not applied: SKIPPED. This rule was not applied.",
     ]
+
+
+def test_check_skipped_reddening_does_not_reject(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One color skips reddening, and the object can still be a candidate.
+
+    r fades quickly, and the only g point is red, so fade and color
+    pass. There is no second color, so reddening's ``passed`` is
+    ``None``. ``_measured_rules_passed`` leaves that rule out, and the
+    printed first line stays CANDIDATE.
+    """
+    curve = pd.DataFrame(
+        {
+            "time_days": [0.0, 1.0, 2.0, 3.0, 2.0],
+            "filter": ["r", "r", "r", "r", "g"],
+            "magnitude": [20.6, 19.6, 20.1, 20.6, 20.5],
+            "magnitude_error": [0.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    path = tmp_path / "one_color.csv"
+    curve.to_csv(path, index=False)
+    verdict = is_kilonova_candidate(pd.read_csv(path))
+    assert verdict.fade.passed is True
+    assert verdict.color.passed is True
+    assert verdict.reddening.passed is None
+    assert verdict.is_candidate is True
+
+    main(["check", str(path)])
+
+    printed = capsys.readouterr().out
+    assert printed.splitlines()[0] == "CANDIDATE"
+    assert f"Reddening: SKIPPED. {verdict.reddening.explanation}" in printed
 
 
 def _slow_fading_curve() -> pd.DataFrame:
