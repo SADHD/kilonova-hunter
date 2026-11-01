@@ -6,8 +6,9 @@ collide. Version 1.0 will score each candidate with rules you can read, and
 publish how many fake kilonovae those rules catch and which real objects fool them.
 
 This repository is the foundation. The pipeline modules are in place, the
-`kilohunt` command runs, and a made-up light curve can be plotted today.
-Talking to the live alert stream comes in the next sprint.
+`kilohunt` command runs, and a made-up light curve can be plotted and
+checked against the v1 rules today. Talking to the live alert stream comes
+in the next sprint.
 
 If you have written a little Java: a **module** (a `.py` file) is a file of
 functions, and the package `kilonova_hunter` is the folder that groups them,
@@ -77,6 +78,20 @@ The picture is saved to `output/demo_kilonova.png`. That folder is listed in
 seed is already in the repo at
 [docs/example_kilonova.png](docs/example_kilonova.png).
 
+The same command also prints the filter verdict for the noise-free version
+of that curve. The picture keeps a little random scatter. The verdict
+leaves the scatter off, so the sentences match the rates built into the
+toy and do not change when you change `--seed`.
+
+To save that noise-free curve as a CSV you can check later:
+
+```bash
+uv run kilohunt demo --save-csv output/demo_kilonova.csv
+```
+
+`output/` is gitignored. A copy of the noise-free curve is already in the
+repo at [examples/demo_kilonova.csv](examples/demo_kilonova.csv).
+
 The same two function calls, written out so you can read them, are in
 `notebooks/plot_fake_kilonova.py`:
 
@@ -88,6 +103,48 @@ See every command:
 
 ```bash
 uv run kilohunt --help
+```
+
+## Check a light curve
+
+`kilohunt check` reads one light curve from a CSV file and runs the v1
+rules. CSV means comma-separated values: the first row is the column
+names, and each row after that is one observation. The columns are the
+same ones the demo builds: `time_days`, `filter`, `magnitude`, and
+`magnitude_error`. `filter` is the band, such as `g`, `r`, or `i`. The
+table further down says what each column means.
+
+```bash
+uv run kilohunt check examples/demo_kilonova.csv
+```
+
+The first line is the overall answer, `CANDIDATE` or `NOT A CANDIDATE`.
+Each line after that is one rule, marked `PASS`, `FAIL`, or `SKIPPED`,
+plus one sentence that says why. The command prints every rule the
+verdict carries. It does not have the rule names written out by hand,
+so a rule added later shows up on its own. Today the rules are the fade,
+the color, and the reddening (whether g minus r keeps climbing). Fade
+and color have to pass. Reddening has to pass when two colors can be
+compared. If there are not two colors, reddening is `SKIPPED`. A skip
+does not reject the object, so the first line can still be `CANDIDATE`.
+
+On the noise-free demo, which does have two colors, the printout is:
+
+```text
+CANDIDATE
+Fade: PASS. It faded 0.90 mag/day in g, which is faster than 0.30 mag/day, so the fade rule passes.
+Color: PASS. 1 day after the r-band peak, g minus r is 0.35, which is redder than 0.00, so the color rule passes.
+Reddening: PASS. From day 0.00 to day 2.00, g minus r went from -0.40 to 0.35, a rise of 0.75 mag, which is more than 0.10 mag, so the reddening rule passes.
+```
+
+A file that loads exits with code 0 even when the answer is not a
+candidate. The answer is the printout, not a crash. A missing file, or
+a CSV that does not have those columns, exits with a nonzero code and
+prints what went wrong.
+
+```bash
+uv run kilohunt demo --save-csv output/demo_kilonova.csv
+uv run kilohunt check output/demo_kilonova.csv
 ```
 
 ## Run the tests and the style check
@@ -123,7 +180,7 @@ Rubin alerts (via a broker)
    features.py         rise rate, fade rate, color    Sprint 2
         │
         ▼
-    filter.py          kilonova rules and reasons     Sprint 3
+    filter.py          kilonova rules and reasons     one light curve works now
         │
         ▼
     report.py          plots and the candidate list   plot works now
@@ -135,7 +192,7 @@ Two checks sit beside that pipeline:
 | --- | --- | --- |
 | `inject.py` | Fake kilonovae, so we can measure how many true ones the filter would catch | The simple curve works now. Published models arrive in Sprint 4 |
 | `tns.py` | Confirmed types from the Transient Name Server, so we can see what fooled the filter | Sprint 5 |
-| `cli.py` | The `kilohunt` command | `demo` and `--help` work now. `--week` arrives in Sprint 3 |
+| `cli.py` | The `kilohunt` command | `demo`, `check`, and `--help` work now. `--week` arrives in Sprint 3 |
 
 A light curve is a pandas table. The demo and the plot helper share these columns:
 
@@ -154,6 +211,7 @@ kilonova-hunter/
 ├── src/kilonova_hunter/    the package (one module per stage)
 ├── tests/                  pytest tests
 ├── notebooks/              short exploration scripts
+├── examples/               a sample light curve CSV for kilohunt check
 ├── scoring/                weekly scorecards, once Sprint 5 writes them
 ├── docs/                   write-ups and the sample plot
 ├── pyproject.toml          project name, Python version, libraries
