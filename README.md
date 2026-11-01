@@ -122,8 +122,20 @@ The first line is the overall answer, `CANDIDATE` or `NOT A CANDIDATE`.
 Each line after that is one rule, marked `PASS`, `FAIL`, or `SKIPPED`,
 plus one sentence that says why. The command prints every rule the
 verdict carries. It does not have the rule names written out by hand,
-so a rule added later shows up on its own. Today the rules are the fade
-and the color. A rule that was not applied is `SKIPPED`.
+so a rule added later shows up on its own. Today the rules are the fade,
+the color, and the reddening (whether g minus r keeps climbing). Fade
+and color have to pass. Reddening has to pass when two colors can be
+compared. If there are not two colors, reddening is `SKIPPED`. A skip
+does not reject the object, so the first line can still be `CANDIDATE`.
+
+On the noise-free demo, which does have two colors, the printout is:
+
+```text
+CANDIDATE
+Fade: PASS. It faded 0.90 mag/day in g, which is faster than 0.30 mag/day, so the fade rule passes.
+Color: PASS. 1 day after the r-band peak, g minus r is 0.35, which is redder than 0.00, so the color rule passes.
+Reddening: PASS. From day 0.00 to day 2.00, g minus r went from -0.40 to 0.35, a rise of 0.75 mag, which is more than 0.10 mag, so the reddening rule passes.
+```
 
 A file that loads exits with code 0 even when the answer is not a
 candidate. The answer is the printout, not a crash. A missing file, or

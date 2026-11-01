@@ -210,18 +210,15 @@ def _iter_rule_results(
 def _rule_status(result: RuleResult) -> str:
     """Return PASS, FAIL, or SKIPPED for one rule result.
 
-    SKIPPED is for a rule that was not applied. The result says that
-    either by setting ``skipped`` to True, or by leaving ``passed``
-    empty (``None``). Fade and color always pass or fail. A later rule,
-    such as reddening, may be skipped when the curve does not have the
-    measurements that rule needs.
+    SKIPPED means ``passed`` is ``None``: the rule was not applied.
+    Reddening does that when there are not two colors to compare. A
+    skip is not a failure, and it does not turn the overall line into
+    ``NOT A CANDIDATE``. Fade and color always pass or fail. Too little
+    data for those two is FAIL.
     """
-    if getattr(result, "skipped", False):
+    if result.passed is None:
         return "SKIPPED"
-    passed = getattr(result, "passed", None)
-    if passed is None:
-        return "SKIPPED"
-    if passed:
+    if result.passed:
         return "PASS"
     return "FAIL"
 
