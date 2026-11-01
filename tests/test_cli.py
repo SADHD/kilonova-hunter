@@ -137,7 +137,15 @@ def test_check_slow_fade_is_not_a_candidate(
 def test_check_example_csv_is_a_candidate(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The CSV in ``examples/`` is the noise-free demo, and check agrees."""
+    """The CSV in ``examples/`` is the noise-free demo, and check agrees.
+
+    Magnitudes are written with four decimal places, so the file does
+    not contain a binary tail such as ``20.900000000000002``.
+    """
+    text = _EXAMPLE_CSV.read_text(encoding="utf-8")
+    assert "20.9000" in text
+    assert "000000" not in text
+
     saved = pd.read_csv(_EXAMPLE_CSV)
     expected = simulate_kilonova_light_curve(noise_mag=0.0)
     pd.testing.assert_frame_equal(saved, expected, check_dtype=False)
@@ -161,6 +169,43 @@ def test_check_missing_file_exits_nonzero(
     assert captured.out == ""
     assert str(missing) in captured.err
     assert "does not exist" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("bad_column", "time_days", "magnitude"),
+    [
+        ("time_days", "noon", "19.5"),
+        ("magnitude", "1.0", "bright"),
+    ],
+)
+def test_check_non_numeric_value_exits_nonzero(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    bad_column: str,
+    time_days: str,
+    magnitude: str,
+) -> None:
+    """A word in ``time_days`` or ``magnitude`` exits 1 instead of crashing.
+
+    Those two columns are the numbers the filter fits. Text there used
+    to raise ``ValueError: could not convert string to float`` from
+    inside the fit. The command should stop with a sentence that names
+    the column, and it should not print a verdict.
+    """
+    path = tmp_path / "words.csv"
+    path.write_text(
+        f"time_days,filter,magnitude,magnitude_error\n{time_days},g,{magnitude},0.05\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as caught:
+        main(["check", str(path)])
+
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert bad_column in captured.err
+    assert "number" in captured.err.lower()
 
 
 def test_check_missing_columns_exits_nonzero(
