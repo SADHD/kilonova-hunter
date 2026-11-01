@@ -87,6 +87,7 @@ def simulate_kilonova_light_curve(
     duration_days: float = 10.0,
     step_days: float = 0.5,
     seed: int = 42,
+    noise_mag: float | None = None,
 ) -> pd.DataFrame:
     """Build a made-up kilonova light curve in the g and r filters.
 
@@ -103,14 +104,18 @@ def simulate_kilonova_light_curve(
         step_days: Time between observations. The default is a smooth teaching
             curve, not Rubin's real cadence.
         seed: Starting point for the random noise.
+        noise_mag: How wide the random scatter is, in magnitudes. Omit
+            this to use ``NOISE_MAG``. Pass ``0`` for the smooth curve
+            with the noise left off, which is what the filter tests check.
 
     Returns:
         One row per observation, with columns ``time_days``, ``filter``,
         ``magnitude``, and ``magnitude_error``. A smaller magnitude is brighter.
 
     Raises:
-        ValueError: If the duration is too short to show the fade, or the
-            step is not a positive number of days.
+        ValueError: If the duration is too short to show the fade, the
+            step is not a positive number of days, or ``noise_mag`` is
+            negative.
     """
     # The fade is the part a kilonova filter cares about, so a curve that
     # ends at the peak is not a useful example.
@@ -122,6 +127,11 @@ def simulate_kilonova_light_curve(
     if step_days <= 0:
         raise ValueError(
             f"step_days must be a positive number of days, got {step_days}."
+        )
+    scatter = NOISE_MAG if noise_mag is None else noise_mag
+    if scatter < 0:
+        raise ValueError(
+            f"noise_mag must be zero or a positive number of magnitudes, got {scatter}."
         )
 
     # Half a step past the end makes the last day included when it lands on
@@ -141,14 +151,19 @@ def simulate_kilonova_light_curve(
             rise_per_day=params["rise_per_day"],
             fade_per_day=params["fade_per_day"],
         )
-        noise = rng.normal(0.0, NOISE_MAG, size=times.size)
+        # Scale zero would also draw zeros, but writing the smooth case
+        # out makes it obvious the noise was left off on purpose.
+        if scatter == 0:
+            noise = np.zeros(times.size)
+        else:
+            noise = rng.normal(0.0, scatter, size=times.size)
         frames.append(
             pd.DataFrame(
                 {
                     "time_days": times,
                     "filter": filter_name,
                     "magnitude": smooth + noise,
-                    "magnitude_error": NOISE_MAG,
+                    "magnitude_error": scatter,
                 }
             )
         )
