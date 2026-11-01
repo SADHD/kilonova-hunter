@@ -26,9 +26,10 @@ or what color it was. Reddening is different: one color snapshot is
 not evidence against a kilonova, so a missing second color does not
 reject the object.
 
-``is_kilonova_candidate`` checks one light curve. Scoring a whole
-downloaded night, and printing the list from the command line, is not
-wired up yet.
+``is_kilonova_candidate`` checks one light curve. ``kilohunt check``
+prints that verdict for a CSV, and ``kilohunt demo`` prints it for the
+noise-free toy curve. Scoring a whole downloaded night is not wired
+up yet.
 """
 
 from dataclasses import dataclass
@@ -59,8 +60,9 @@ class RuleResult:
             and None when it was skipped. Only the reddening rule
             skips. It skips when there are not two colors to compare.
             A skip is not a failure, and it does not reject the object.
-            The fade rule and the single-time color rule still use
-            False when they do not have enough data.
+            The command line prints that as SKIPPED. The fade rule and
+            the single-time color rule still use False when they do not
+            have enough data.
         explanation: One plain-English sentence. It says why the rule
             passed, why it failed, or why it was skipped.
     """
@@ -73,9 +75,16 @@ class RuleResult:
 class CandidateVerdict:
     """Whether one light curve looks like a kilonova, and why.
 
+    Each rule is its own field, holding a ``RuleResult``. The command
+    line prints one line per rule by walking those fields. It does not
+    have the names fade and color written out by hand, so a new rule
+    field (for example reddening) is printed too. A rule that says it
+    was skipped is printed as SKIPPED.
+
     Attributes:
         is_candidate: True when every rule that could be measured
-            passed. A skipped rule does not count as a failure.
+            passed. A skipped rule (``passed`` is ``None``) does not
+            count as a failure and does not block the candidate.
         fade: The fast-fade rule.
         color: The red-color rule (g minus r at one time after the peak).
         reddening: The "keeps getting redder" rule. g minus r has to
@@ -309,9 +318,10 @@ def evaluate_reddening_rule(
 def score_candidates(features: pd.DataFrame) -> pd.DataFrame:
     """Score a whole night of transients.
 
-    The check for one light curve is ``is_kilonova_candidate``. Applying
-    it to a table of many objects, and printing that list, waits until
-    the download and the command line are wired up.
+    The check for one light curve is ``is_kilonova_candidate``.
+    ``kilohunt check`` prints that verdict for a CSV. Applying the
+    rules to a table of many objects waits until a night of alerts
+    can be downloaded.
 
     Args:
         features: One row per transient, as ``measure_features`` returns.
