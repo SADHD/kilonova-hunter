@@ -143,6 +143,8 @@ def test_blue_source_fails_the_color_rule() -> None:
     verdict = is_kilonova_candidate(curve)
     assert verdict.fade.passed
     assert not verdict.color.passed
+    # The color is held still, so the rise is 0.00 and reddening fails.
+    assert verdict.reddening.passed is False
     assert not verdict.is_candidate
     assert verdict.color.explanation == (
         "1 day after the r-band peak, g minus r is -0.40, which is not "

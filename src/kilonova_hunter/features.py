@@ -312,6 +312,12 @@ def g_minus_r_rise(
             ),
         )
 
+    # TODO(before redback recall run): the rise only compares the earliest
+    # color with one later color, and it ignores magnitude_error (how
+    # uncertain each brightness is). On noisy data one bad first point
+    # can swing the result. Options for later, not for now: a fit through
+    # all the colors in the window, or an error-weighted rise that trusts
+    # a precise point more than a noisy one.
     earliest = samples[0]
     # Walk forward from the first color. A later color that is too close
     # is still the same moment, so it does not show a change. A color
