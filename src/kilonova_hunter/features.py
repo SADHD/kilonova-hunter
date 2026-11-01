@@ -1,18 +1,20 @@
 """Measure how one light curve fades, and what color it is.
 
 Kilonova debris brightens within about a day, fades within days, and
-turns red as it cools. This module measures two of those facts for a
-single light curve:
+turns red as it cools. This module measures those facts for a single
+light curve:
 
 - the fade rate in each band, as a straight line fitted after the
   brightest point
 - g minus r at one chosen time
+- how much g minus r rises between the earliest color and a later one
 
 A negative fade rate means the object is still getting brighter,
-because a smaller magnitude is brighter. Too few points returns
-``None`` for the number and a sentence that says why, instead of
-raising. Summarizing a whole night of objects into one table is still
-``measure_features``, which is not wired up yet.
+because a smaller magnitude is brighter. A positive color rise means
+the object got redder. Too few points returns ``None`` for the number
+and a sentence that says why, instead of raising. Summarizing a whole
+night of objects into one table is still ``measure_features``, which
+is not wired up yet.
 """
 
 from dataclasses import dataclass
@@ -65,6 +67,50 @@ class ColorMeasurement:
 
     g_minus_r: float | None
     time_days: float
+    explanation: str
+
+
+@dataclass(frozen=True)
+class ColorSample:
+    """g minus r at one time where both bands can be read.
+
+    Attributes:
+        time_days: When this color was read.
+        g_minus_r: g magnitude minus r magnitude. A larger number is
+            redder.
+    """
+
+    time_days: float
+    g_minus_r: float
+
+
+@dataclass(frozen=True)
+class ColorRise:
+    """How much g minus r changed between two times.
+
+    Attributes:
+        rise: The later color minus the earlier color, in magnitudes.
+            ``None`` when there are not two colors inside the window.
+            A positive number means the object got redder. A negative
+            number means it got bluer.
+        earlier_time_days: When the first color was read, or ``None``
+            if no color could be read at all.
+        later_time_days: When the comparison color was read, or
+            ``None`` if there was no later color inside the window.
+        earlier_g_minus_r: g minus r at the earlier time, or ``None``.
+        later_g_minus_r: g minus r at the later time, or ``None``.
+        color_count: How many times g minus r could be read, before
+            the window is applied. Two are required before a rise exists.
+        explanation: One sentence. On success it states the rise. On
+            failure it says there was not enough data.
+    """
+
+    rise: float | None
+    earlier_time_days: float | None
+    later_time_days: float | None
+    earlier_g_minus_r: float | None
+    later_g_minus_r: float | None
+    color_count: int
     explanation: str
 
 
@@ -165,6 +211,154 @@ def g_minus_r_at_time(
     )
 
 
+def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
+    """Read g minus r at every time the data can support.
+
+    The times we try are the times when g or r was observed. If the
+    other band was not observed at that exact time, its magnitude is
+    read off the straight line between its neighbors. That is the same
+    reading ``g_minus_r_at_time`` already does. We do not invent extra
+    times between visits.
+
+    A time before the first point of either band, or after the last
+    point, is left out. Extending the line past the data would invent
+    a detection. Two observations closer than a tiny rounding error
+    are one visit, so they produce one color, not two.
+
+    Args:
+        light_curve: One object, with the usual light-curve columns.
+
+    Returns:
+        The colors, earliest first. Empty when g or r is missing, or
+        when their times do not overlap.
+
+    Raises:
+        ValueError: If the table is missing a required column.
+    """
+    _require_light_curve(light_curve)
+    g_points = _usable_points(light_curve, "g")
+    r_points = _usable_points(light_curve, "r")
+    if g_points.empty or r_points.empty:
+        return []
+
+    samples: list[ColorSample] = []
+    for time_days in _visit_times(g_points, r_points):
+        # Ask the existing color helper. It returns None when this time
+        # would need a guess past the first or last point of either band.
+        color = g_minus_r_at_time(light_curve, time_days)
+        if color.g_minus_r is None:
+            continue
+        samples.append(ColorSample(time_days=time_days, g_minus_r=color.g_minus_r))
+    return samples
+
+
+def g_minus_r_rise(
+    light_curve: pd.DataFrame,
+    thresholds: Thresholds | None = None,
+) -> ColorRise:
+    """Measure how much g minus r climbed inside the time window.
+
+    The earlier color is the earliest one ``g_minus_r_over_time`` can
+    read. The later color is the last one that is still inside
+    ``reddening_window_days`` of that first color, and at least
+    ``min_color_separation_days`` after it. The rise is the later color
+    minus the earlier color. Using the last color in the window asks
+    "how much redder did it get over that whole stretch?", rather than
+    "did the very next visit move?".
+
+    If there are not two colors that fit that window, ``rise`` is
+    ``None``. This function only measures. The filter decides whether
+    the rise is large enough, and it skips the rule when ``rise`` is
+    ``None``.
+
+    Args:
+        light_curve: One object, with the usual light-curve columns.
+        thresholds: The window and the minimum separation. Omit this to
+            use ``THRESHOLDS`` from ``config.py``.
+
+    Returns:
+        The rise, the two times and colors that produced it, how many
+        colors could be read, and one sentence.
+
+    Raises:
+        ValueError: If the table is missing a required column.
+    """
+    settings = resolve_thresholds(thresholds)
+    samples = g_minus_r_over_time(light_curve)
+    if len(samples) == 0:
+        return ColorRise(
+            rise=None,
+            earlier_time_days=None,
+            later_time_days=None,
+            earlier_g_minus_r=None,
+            later_g_minus_r=None,
+            color_count=0,
+            explanation=(
+                "Not enough data: g minus r could not be measured at any time."
+            ),
+        )
+    if len(samples) == 1:
+        only = samples[0]
+        return ColorRise(
+            rise=None,
+            earlier_time_days=only.time_days,
+            later_time_days=None,
+            earlier_g_minus_r=only.g_minus_r,
+            later_g_minus_r=None,
+            color_count=1,
+            explanation=(
+                "Not enough data: g minus r was measured only once, "
+                f"at day {only.time_days:.2f}."
+            ),
+        )
+
+    earliest = samples[0]
+    # Walk forward from the first color. A later color that is too close
+    # is still the same moment, so it does not show a change. A color
+    # past the window is too late for this comparison. The last color we
+    # keep is the far end of the window.
+    window_end = earliest.time_days + settings.reddening_window_days
+    earliest_later = earliest.time_days + settings.min_color_separation_days
+    later: ColorSample | None = None
+    for sample in samples[1:]:
+        if sample.time_days < earliest_later - _SAME_VISIT_DAYS:
+            continue
+        if sample.time_days > window_end + _SAME_VISIT_DAYS:
+            break
+        later = sample
+
+    if later is None:
+        return ColorRise(
+            rise=None,
+            earlier_time_days=earliest.time_days,
+            later_time_days=None,
+            earlier_g_minus_r=earliest.g_minus_r,
+            later_g_minus_r=None,
+            color_count=len(samples),
+            explanation=(
+                "Not enough data: no later g minus r measurement falls "
+                f"inside the {settings.reddening_window_days:.2f}-day window "
+                "after the first color, at least "
+                f"{settings.min_color_separation_days:.2f} days after it."
+            ),
+        )
+
+    rise = later.g_minus_r - earliest.g_minus_r
+    return ColorRise(
+        rise=rise,
+        earlier_time_days=earliest.time_days,
+        later_time_days=later.time_days,
+        earlier_g_minus_r=earliest.g_minus_r,
+        later_g_minus_r=later.g_minus_r,
+        color_count=len(samples),
+        explanation=(
+            f"From day {earliest.time_days:.2f} to day {later.time_days:.2f}, "
+            f"g minus r went from {earliest.g_minus_r:.2f} to "
+            f"{later.g_minus_r:.2f}, a rise of {rise:.2f} mag."
+        ),
+    )
+
+
 def peak_time_days(light_curve: pd.DataFrame, band: str) -> float | None:
     """Return the time of the brightest point in one band.
 
@@ -203,9 +397,9 @@ def peak_time_days(light_curve: pd.DataFrame, band: str) -> float | None:
 def measure_features(light_curves: pd.DataFrame) -> pd.DataFrame:
     """Summarize every transient in a night with a rise, a fade, and a color.
 
-    For one light curve, call ``fade_rates`` and ``g_minus_r_at_time``.
-    Folding a whole downloaded night into one row per object is not
-    wired up yet.
+    For one light curve, call ``fade_rates``, ``g_minus_r_at_time``,
+    and ``g_minus_r_rise``. Folding a whole downloaded night into one
+    row per object is not wired up yet.
 
     Args:
         light_curves: Cleaned light curves, one row per observation.
@@ -218,7 +412,8 @@ def measure_features(light_curves: pd.DataFrame) -> pd.DataFrame:
     """
     raise NotImplementedError(
         "A table of features for many transients is not wired up yet. "
-        "For one light curve, call fade_rates and g_minus_r_at_time "
+        "For one light curve, call fade_rates, g_minus_r_at_time, "
+        "and g_minus_r_rise "
         f"(this table has {len(light_curves)} rows)."
     )
 
@@ -343,6 +538,24 @@ def _magnitude_at_time(points: pd.DataFrame, when_days: float) -> float | None:
     # 0 means "at the earlier point", 1 means "at the later point".
     fraction = (when_days - earlier_time) / gap
     return earlier_magnitude + fraction * (later_magnitude - earlier_magnitude)
+
+
+def _visit_times(*bands: pd.DataFrame) -> list[float]:
+    """Observation times from one or more bands, one entry per visit.
+
+    Times closer than ``_SAME_VISIT_DAYS`` are the same visit. Keeping
+    both would look like two colors when the telescope only looked once.
+    """
+    raw: list[float] = []
+    for points in bands:
+        raw.extend(float(value) for value in points["time_days"])
+    raw.sort()
+    visits: list[float] = []
+    for time_days in raw:
+        if visits and abs(time_days - visits[-1]) <= _SAME_VISIT_DAYS:
+            continue
+        visits.append(time_days)
+    return visits
 
 
 def _usable_points(light_curve: pd.DataFrame, band: str) -> pd.DataFrame:
