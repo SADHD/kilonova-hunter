@@ -4,18 +4,27 @@ The module is named ``filter`` because it narrows a night of alerts down
 to a short candidate list. It has nothing to do with Python's built-in
 ``filter`` function.
 
-Version 1 has two rules, and each one comes with a sentence a newcomer
+Version 1 has three rules, and each one comes with a sentence a newcomer
 can read:
 
 - Fade: the object fades faster than the cut in ``config.py`` in any
   one of g, r, or i. The cut is 0.3 magnitudes per day, signed off from
   ZTFReST. See ``FADE_FASTER_THAN_MAG_PER_DAY``.
 - Color: after the peak, g minus r is redder than the cut in
-  ``config.py``. That cut is still a placeholder.
+  ``config.py``. That cut is still a placeholder. This is one moment
+  in time, not a change.
+- Reddening: g minus r climbs by more than the cut in ``config.py``
+  between the earliest color and a later color inside a time window.
+  Those cuts are still placeholders. This is the "keeps getting redder"
+  check. If there are not two colors to compare, this rule is skipped.
 
-Both rules have to pass. A rule that cannot be measured (too few
-points) fails, with a sentence that says there was not enough data.
-We do not call something a kilonova when we cannot tell.
+The fade rule and the color rule have to pass. The reddening rule has
+to pass when it can be measured. A fade or a color that cannot be
+measured fails, with a sentence that says there was not enough data.
+We do not call something a kilonova when we cannot tell how it faded
+or what color it was. Reddening is different: one color snapshot is
+not evidence against a kilonova, so a missing second color does not
+reject the object.
 
 ``is_kilonova_candidate`` checks one light curve. Scoring a whole
 downloaded night, and printing the list from the command line, is not
@@ -27,7 +36,13 @@ from dataclasses import dataclass
 import pandas as pd
 
 from kilonova_hunter.config import THRESHOLDS, Thresholds, resolve_thresholds
-from kilonova_hunter.features import fade_rates, g_minus_r_at_time, peak_time_days
+from kilonova_hunter.features import (
+    ColorRise,
+    fade_rates,
+    g_minus_r_at_time,
+    g_minus_r_rise,
+    peak_time_days,
+)
 
 # The fade cut lives in config.py so there is one place to change it.
 # This name stays because tests and comments already use it. Do not
@@ -37,15 +52,20 @@ FADE_FASTER_THAN_MAG_PER_DAY = THRESHOLDS.fade_faster_than_mag_per_day
 
 @dataclass(frozen=True)
 class RuleResult:
-    """One yes-or-no rule and the sentence that explains it.
+    """One rule and the sentence that explains it.
 
     Attributes:
-        passed: True when this rule is satisfied.
+        passed: True when this rule is satisfied, False when it is not,
+            and None when it was skipped. Only the reddening rule
+            skips. It skips when there are not two colors to compare.
+            A skip is not a failure, and it does not reject the object.
+            The fade rule and the single-time color rule still use
+            False when they do not have enough data.
         explanation: One plain-English sentence. It says why the rule
-            passed, why it failed, or that there was not enough data.
+            passed, why it failed, or why it was skipped.
     """
 
-    passed: bool
+    passed: bool | None
     explanation: str
 
 
@@ -54,14 +74,18 @@ class CandidateVerdict:
     """Whether one light curve looks like a kilonova, and why.
 
     Attributes:
-        is_candidate: True only when every rule passed.
+        is_candidate: True when every rule that could be measured
+            passed. A skipped rule does not count as a failure.
         fade: The fast-fade rule.
-        color: The red-color rule (g minus r after the peak).
+        color: The red-color rule (g minus r at one time after the peak).
+        reddening: The "keeps getting redder" rule. g minus r has to
+            climb between two times.
     """
 
     is_candidate: bool
     fade: RuleResult
     color: RuleResult
+    reddening: RuleResult
 
 
 def is_kilonova_candidate(
@@ -78,8 +102,9 @@ def is_kilonova_candidate(
             ``THRESHOLDS`` from ``config.py``.
 
     Returns:
-        Pass or fail for each rule, each with one sentence, plus
-        ``is_candidate`` for the combination.
+        Pass, fail, or skip for each rule, each with one sentence, plus
+        ``is_candidate`` for the combination. A skipped rule does not
+        turn a candidate into a reject.
 
     Raises:
         ValueError: If the table is missing a required column.
@@ -87,10 +112,14 @@ def is_kilonova_candidate(
     settings = resolve_thresholds(thresholds)
     fade = evaluate_fade_rule(light_curve, settings)
     color = evaluate_color_rule(light_curve, settings)
+    reddening = evaluate_reddening_rule(light_curve, settings)
+    # passed is None on a skip. None is not False, so a skip does not
+    # block. The fade and color rules still have to pass.
     return CandidateVerdict(
-        is_candidate=fade.passed and color.passed,
+        is_candidate=_measured_rules_passed(fade, color, reddening),
         fade=fade,
         color=color,
+        reddening=reddening,
     )
 
 
@@ -212,6 +241,71 @@ def evaluate_color_rule(
     )
 
 
+def evaluate_reddening_rule(
+    light_curve: pd.DataFrame,
+    thresholds: Thresholds | None = None,
+) -> RuleResult:
+    """Apply the "keeps getting redder" rule to one light curve.
+
+    g minus r should climb between the earliest color we can measure
+    and a later color inside the time window. The climb has to be
+    strictly larger than ``min_g_minus_r_rise``. A color that stays
+    the same, or gets bluer, fails.
+
+    If there are not two colors to compare, the rule is skipped.
+    ``passed`` is ``None``, and the sentence says why. One snapshot
+    can still be red. We only reject when we can see that the color
+    is not climbing. The fade rule and the single-time color rule do
+    not skip: too little data for those still fails them.
+
+    Args:
+        light_curve: One object, with the usual light-curve columns.
+        thresholds: Cuts and helper settings. Omit this to use the
+            project defaults.
+
+    Returns:
+        Pass, fail, or skip, and one sentence explaining it.
+    """
+    settings = resolve_thresholds(thresholds)
+    change = g_minus_r_rise(light_curve, settings)
+    # A rise only exists when both colors were read. If any piece is
+    # missing, we skip instead of rejecting the object.
+    if (
+        change.rise is None
+        or change.earlier_time_days is None
+        or change.later_time_days is None
+        or change.earlier_g_minus_r is None
+        or change.later_g_minus_r is None
+    ):
+        return RuleResult(
+            passed=None,
+            explanation=_skipped_reddening_sentence(change, settings),
+        )
+
+    rise_text = f"{change.rise:.2f}"
+    cut_text = f"{settings.min_g_minus_r_rise:.2f}"
+    span = (
+        f"From day {change.earlier_time_days:.2f} to day "
+        f"{change.later_time_days:.2f}, g minus r went from "
+        f"{change.earlier_g_minus_r:.2f} to {change.later_g_minus_r:.2f}, "
+        f"a rise of {rise_text} mag, "
+    )
+    if change.rise > settings.min_g_minus_r_rise:
+        return RuleResult(
+            passed=True,
+            explanation=(
+                f"{span}which is more than {cut_text} mag, "
+                "so the reddening rule passes."
+            ),
+        )
+    return RuleResult(
+        passed=False,
+        explanation=(
+            f"{span}which is not more than {cut_text} mag, so the reddening rule fails."
+        ),
+    )
+
+
 def score_candidates(features: pd.DataFrame) -> pd.DataFrame:
     """Score a whole night of transients.
 
@@ -233,6 +327,40 @@ def score_candidates(features: pd.DataFrame) -> pd.DataFrame:
         "Scoring a whole night is not wired up yet. For one light curve, "
         "call is_kilonova_candidate "
         f"(this table has {len(features)} rows)."
+    )
+
+
+def _measured_rules_passed(*rules: RuleResult) -> bool:
+    """True when every rule that was actually measured passed.
+
+    ``passed is None`` means the rule was skipped. A skipped rule is
+    left out of this check, so it does not keep the object off the
+    candidate list. ``passed is False`` means we measured the rule and
+    it failed, and the object is not a candidate.
+    """
+    return all(rule.passed is not False for rule in rules)
+
+
+def _skipped_reddening_sentence(change: ColorRise, settings: Thresholds) -> str:
+    """Explain why the reddening rule was not applied.
+
+    The sentence starts with "Skipped" so it cannot be read as a
+    failure, and it says the object is not rejected.
+    """
+    if change.color_count <= 0:
+        reason = "g minus r could not be measured at any time"
+    elif change.color_count == 1:
+        reason = "g minus r was measured only once"
+    else:
+        window = f"{settings.reddening_window_days:.2f}"
+        gap = f"{settings.min_color_separation_days:.2f}"
+        reason = (
+            "no later g minus r measurement falls inside the "
+            f"{window}-day window, at least {gap} days after the first color"
+        )
+    return (
+        f"Skipped: {reason}, so we cannot tell whether it keeps getting "
+        "redder. This rule does not reject the object."
     )
 
 
