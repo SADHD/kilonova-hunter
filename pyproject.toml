@@ -19,6 +19,14 @@ dependencies = [
 [project.scripts]
 kilohunt = "kilonova_hunter.cli:main"
 
+[project.optional-dependencies]
+# Physical kilonova light curves for `kilohunt recall`.
+# Install with: uv sync --extra sim
+# Left out of the default install so tests and CI stay light.
+sim = [
+    "redback",
+]
+
 [dependency-groups]
 dev = [
     "pytest",
