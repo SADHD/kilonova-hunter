@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 
 from kilonova_hunter.config import THRESHOLDS
+from kilonova_hunter.features import g_minus_r_rise
 from kilonova_hunter.filter import (
     FADE_FASTER_THAN_MAG_PER_DAY,
     evaluate_color_rule,
@@ -309,8 +310,9 @@ def test_stays_equally_red_fails_reddening() -> None:
     fails, and that failure rejects the object.
 
     The sentence quotes the fitted line, not a raw pair of points. A
-    flat line is a rise of 0.00 either way, so this wording change does
-    not change the verdict.
+    flat line is a rise of 0.00 either way. The curve's errors are all
+    zero, which counts as unknown, so the sentence also says the colors
+    were weighted equally. The verdict is still a failure.
     """
     curve = _fading_curve(fade_per_day=0.8, g_minus_r=0.4)
     verdict = is_kilonova_candidate(curve)
@@ -320,7 +322,8 @@ def test_stays_equally_red_fails_reddening() -> None:
     assert verdict.reddening.explanation == (
         "From day 0.00 to day 2.00, a straight-line fit of g minus r "
         "goes from 0.40 to 0.40, a rise of 0.00 mag, which is not more "
-        "than 0.10 mag, so the reddening rule fails."
+        "than 0.10 mag, so the reddening rule fails. "
+        "No color had a known uncertainty, so the fit weighted every color equally."
     )
     assert verdict.is_candidate is False
 
@@ -329,20 +332,124 @@ def test_noise_free_demo_passes_reddening() -> None:
     """The made-up kilonova gets redder across the placeholder window.
 
     g fades faster than r, so g minus r climbs. The noise is off, so
-    every color has an uncertainty of zero and the fit weights them
-    equally. The color is not one straight line: it steepens after the
-    peak, so the fitted colors at the two ends (-0.43 and 0.32) are not
-    the raw measurements (-0.40 and 0.35). The climb of the line across
-    those two days is still 0.75 mag, which is more than the placeholder
-    cut of 0.10.
+    every reported uncertainty is zero. Zero is not treated as an exact
+    measurement, and with no positive uncertainty anywhere the fit
+    weights the colors equally and the sentence says so. The color is
+    not one straight line: it steepens after the peak, so the fitted
+    colors at the two ends (-0.43 and 0.32) are not the raw measurements
+    (-0.40 and 0.35). The climb of the line across those two days is
+    still 0.75 mag, which is more than the placeholder cut of 0.10.
     """
     result = evaluate_reddening_rule(_noise_free_demo())
     assert result.passed is True
     assert result.explanation == (
         "From day 0.00 to day 2.00, a straight-line fit of g minus r "
         "goes from -0.43 to 0.32, a rise of 0.75 mag, which is more than "
-        "0.10 mag, so the reddening rule passes."
+        "0.10 mag, so the reddening rule passes. "
+        "No color had a known uncertainty, so the fit weighted every color equally."
     )
+
+
+def _bad_first_color_curve(
+    *,
+    later_g_error: float,
+) -> pd.DataFrame:
+    """A clearly reddening curve whose first color is one bad point.
+
+    The true colors would be 0.00, 0.25, 0.50, 0.75, 1.00. The first one
+    is recorded as 1.20, with a g-band error of 0.50. The point at day
+    1.0 has ``later_g_error`` instead of the precise 0.02 the others have.
+    Pass ``nan`` for a blank error, or ``0.0`` for a reported zero.
+    """
+    times = (0.0, 0.5, 1.0, 1.5, 2.0)
+    colors = (1.2, 0.25, 0.50, 0.75, 1.00)
+    g_errors = [0.50, 0.02, later_g_error, 0.02, 0.02]
+    rows: list[dict[str, float | str]] = []
+    for time_days, color, g_error in zip(times, colors, g_errors, strict=True):
+        rows.append(
+            {
+                "time_days": time_days,
+                "filter": "r",
+                "magnitude": 20.0,
+                "magnitude_error": 0.02,
+            }
+        )
+        rows.append(
+            {
+                "time_days": time_days,
+                "filter": "g",
+                "magnitude": 20.0 + color,
+                "magnitude_error": g_error,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_one_missing_error_still_passes_and_names_the_stand_in() -> None:
+    """One blank error must not throw away the weights on the other points.
+
+    The first color is a bad 1.20 with a real 0.50 mag error. The color
+    at day 1.0 has a blank g error. Ignoring every weight because of that
+    one blank drops the rise to about 0.04, below the 0.10 cut. The blank
+    is given a stand-in instead: the largest known color uncertainty on
+    the curve. The precise points still pull the line, the rule still
+    passes, and the verdict says "stand-in".
+    """
+    curve = _bad_first_color_curve(later_g_error=np.nan)
+    change = g_minus_r_rise(curve)
+    assert change.rise is not None
+    assert change.rise > 0.5
+    assert "stand-in" in change.explanation
+
+    result = evaluate_reddening_rule(curve)
+    assert result.passed is True
+    assert "stand-in" in result.explanation
+
+
+def test_one_zero_error_still_passes_and_names_the_stand_in() -> None:
+    """A reported error of 0 is unknown, the same as a blank.
+
+    Same curve as the blank-error test, except day 1.0 says its g error
+    is 0.0. That used to be floored to a tiny number and trusted more
+    than any real point. It now takes the stand-in, the rise still
+    clears the cut, and the verdict says "stand-in".
+    """
+    curve = _bad_first_color_curve(later_g_error=0.0)
+    change = g_minus_r_rise(curve)
+    assert change.rise is not None
+    assert change.rise > 0.5
+    assert "stand-in" in change.explanation
+
+    result = evaluate_reddening_rule(curve)
+    assert result.passed is True
+    assert "stand-in" in result.explanation
+
+
+def test_no_known_uncertainties_weight_every_color_equally() -> None:
+    """No positive uncertainty means an unweighted line, and the sentence says so.
+
+    A table with no ``magnitude_error`` column, and the same table with
+    every error set to zero, are both "nothing known". The fit does not
+    invent a stand-in. It weights the colors equally and says so.
+    """
+    curve = pd.DataFrame(
+        {
+            "time_days": [0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
+            "filter": ["g", "r", "g", "r", "g", "r"],
+            "magnitude": [20.0, 20.0, 20.4, 20.0, 20.8, 20.0],
+        }
+    )
+    missing_column = evaluate_reddening_rule(curve)
+    assert missing_column.passed is True
+    assert "stand-in" not in missing_column.explanation
+    assert "weighted every color equally" in missing_column.explanation
+
+    zeros = curve.copy()
+    zeros["magnitude_error"] = 0.0
+    all_zero = evaluate_reddening_rule(zeros)
+    assert all_zero.passed is True
+    assert "stand-in" not in all_zero.explanation
+    assert "weighted every color equally" in all_zero.explanation
 
 
 def test_reddening_rule_reads_the_cuts_from_the_config() -> None:

@@ -39,6 +39,7 @@ import pandas as pd
 from kilonova_hunter.config import THRESHOLDS, Thresholds, resolve_thresholds
 from kilonova_hunter.features import (
     ColorRise,
+    _format_mag,
     fade_rates,
     g_minus_r_at_time,
     g_minus_r_rise,
@@ -301,18 +302,17 @@ def evaluate_reddening_rule(
         f"{_format_mag(change.later_g_minus_r)}, a rise of {rise_text} mag, "
     )
     if change.rise > settings.min_g_minus_r_rise:
-        return RuleResult(
-            passed=True,
-            explanation=(
-                f"{span}which is more than {cut_text} mag, "
-                "so the reddening rule passes."
-            ),
-        )
+        ending = f"which is more than {cut_text} mag, so the reddening rule passes."
+    else:
+        ending = f"which is not more than {cut_text} mag, so the reddening rule fails."
+    # The note says whether every color had a real uncertainty, whether
+    # an unknown one was given a stand-in, or whether the fit gave up
+    # on weights because no uncertainty was known.
+    explanation = f"{span}{ending}"
+    if change.weighting_note:
+        explanation = f"{explanation} {change.weighting_note}"
     return RuleResult(
-        passed=False,
-        explanation=(
-            f"{span}which is not more than {cut_text} mag, so the reddening rule fails."
-        ),
+        passed=change.rise > settings.min_g_minus_r_rise, explanation=explanation
     )
 
 
@@ -339,20 +339,6 @@ def score_candidates(features: pd.DataFrame) -> pd.DataFrame:
         "call is_kilonova_candidate "
         f"(this table has {len(features)} rows)."
     )
-
-
-def _format_mag(value: float) -> str:
-    """Format a magnitude to two decimal places, without a negative zero.
-
-    A perfectly flat fitted line can come back as a tiny negative number.
-    Rounded to two decimals that is still zero, and the sentence should
-    say 0.00 rather than -0.00. ``features._format_mag`` does the same
-    job for the measurement sentence.
-    """
-    text = f"{value:.2f}"
-    if text == "-0.00":
-        return "0.00"
-    return text
 
 
 def _measured_rules_passed(*rules: RuleResult) -> bool:

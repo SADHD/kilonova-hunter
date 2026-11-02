@@ -93,7 +93,7 @@ class ColorSample:
 
 @dataclass(frozen=True)
 class ColorRise:
-    """How much g minus r changed between two times.
+    """How much g minus r rose in a straight-line fit to every color in the window.
 
     Attributes:
         rise: How many magnitudes the fitted line climbs from the first
@@ -118,7 +118,13 @@ class ColorRise:
             the window is applied. Two inside the window, far enough
             apart, are required before a rise exists.
         explanation: One or two sentences. On success it states the
-            rise. On failure it says there was not enough data.
+            rise and how the colors were weighted. On failure it says
+            there was not enough data.
+        weighting_note: The sentence about the weights, also included
+            in ``explanation`` when a line was fit. Empty when no line
+            was fit. The filter copies this into the verdict so a reader
+            can see whether a stand-in uncertainty or an unweighted fit
+            was used.
     """
 
     rise: float | None
@@ -128,6 +134,7 @@ class ColorRise:
     later_g_minus_r: float | None
     color_count: int
     explanation: str
+    weighting_note: str = ""
 
 
 def fade_rates(
@@ -290,12 +297,16 @@ def g_minus_r_rise(
     the raw first point minus the raw last point.
 
     A raw endpoint comparison is easy for one bad measurement to flip.
-    The line has to agree with the colors in between as well. When every
-    color has an uncertainty, the fit is weighted: ``numpy.polyfit`` is
-    called with ``w = 1/sigma``, so a precise color pulls the line more
-    than a noisy one. If any color is missing an uncertainty, or every
-    uncertainty is zero (the noise-free demo), the points are weighted
-    equally. Dividing by zero is not a weight.
+    The line has to agree with the colors in between as well. When a
+    color has a positive uncertainty, the fit is weighted:
+    ``numpy.polyfit`` is called with ``w = 1/sigma``, so a precise color
+    pulls the line more than a noisy one. A color with no usable
+    uncertainty (missing, blank, or zero) does not turn that weighting
+    off. It is given a stand-in: the largest known color uncertainty on
+    the curve, which is a small weight, so the unknown point cannot
+    outvote a precise one. If no color has a known uncertainty, there is
+    no stand-in to copy and the points are weighted equally. The sentence
+    says which of those happened.
 
     The line still has to cover at least ``min_color_separation_days``.
     Two snapshots of the same visit are not a change. If there are not
@@ -378,7 +389,8 @@ def g_minus_r_rise(
     times = np.array([sample.time_days for sample in in_window], dtype=float)
     colors = np.array([sample.g_minus_r for sample in in_window], dtype=float)
     uncertainties = [sample.uncertainty for sample in in_window]
-    fitted = _fit_color_line(times, colors, uncertainties)
+    weights, weighting_note = _color_fit_weights(uncertainties)
+    fitted = _fit_color_line(times, colors, weights)
     if fitted is None:
         return ColorRise(
             rise=None,
@@ -393,7 +405,7 @@ def g_minus_r_rise(
             ),
         )
 
-    slope, intercept, weighted = fitted
+    slope, intercept = fitted
     earlier_time = float(times[0])
     later_time = float(times[-1])
     # slope * span is the climb of the line. Writing it as the fitted
@@ -402,13 +414,6 @@ def g_minus_r_rise(
     fitted_early = intercept + slope * earlier_time
     fitted_late = intercept + slope * later_time
     rise = fitted_late - fitted_early
-    if weighted:
-        weight_sentence = "Each color was weighted by one over its uncertainty."
-    else:
-        weight_sentence = (
-            "The colors were weighted equally, because a usable "
-            "uncertainty was not available on every color."
-        )
     early_text = _format_mag(fitted_early)
     late_text = _format_mag(fitted_late)
     rise_text = _format_mag(rise)
@@ -419,13 +424,14 @@ def g_minus_r_rise(
         earlier_g_minus_r=float(fitted_early),
         later_g_minus_r=float(fitted_late),
         color_count=len(samples),
+        weighting_note=weighting_note,
         explanation=(
             f"From day {earlier_time:.2f} to day {later_time:.2f}, a "
             f"straight-line fit of g minus r goes from {early_text} "
             f"to {late_text}, a rise of {rise_text} mag. "
             f"The fit uses {len(in_window)} colors inside the "
             f"{settings.reddening_window_days:.2f}-day window. "
-            f"{weight_sentence}"
+            f"{weighting_note}"
         ),
     )
 
@@ -638,8 +644,9 @@ def _magnitude_uncertainty_at_time(
 
     ``points`` must already be the usable rows for a single band. Returns
     ``None`` when the table has no ``magnitude_error`` column, or when the
-    points this reading depends on do not have a usable error. A returned
-    ``0.0`` means the table said that magnitude is exact.
+    points this reading depends on do not have a usable error. Zero and
+    negative errors are not usable: a zero is not a real measurement of
+    "exactly no uncertainty", so the fit treats it as unknown.
 
     An exact visit uses that row's error. A time between two visits uses
     the same mix as the interpolated magnitude: if the magnitude is
@@ -652,14 +659,15 @@ def _magnitude_uncertainty_at_time(
     ordered = points.sort_values("time_days")
     times = [float(value) for value in ordered["time_days"]]
     # errors="coerce" turns a word in the error column into "missing"
-    # instead of crashing the fit. A missing error means this color
-    # cannot be weighted, and the line falls back to equal weights.
+    # instead of crashing the fit. A missing error is unknown. If other
+    # colors on the curve do have errors, that unknown color gets a
+    # stand-in rather than turning the weights off.
     numeric_errors = pd.to_numeric(ordered["magnitude_error"], errors="coerce")
     errors = [float(value) for value in numeric_errors]
 
     for time_days, error in zip(times, errors, strict=True):
         if abs(time_days - when_days) <= _SAME_VISIT_DAYS:
-            if not np.isfinite(error) or error < 0:
+            if not _usable_error(error):
                 return None
             return error
 
@@ -688,37 +696,43 @@ def _magnitude_uncertainty_at_time(
     # (1 - f) of the earlier error and f of the later error. hypot is
     # the square root of the sum of squares, which is how independent
     # uncertainties combine.
+    #
+    # Halfway between two neighbors that share one uncertainty sigma,
+    # this is sigma/√2 (sigma divided by the square root of 2), which
+    # is smaller than either neighbor.
+    # Neighboring colors read between visits often reuse those same
+    # visits, so their errors are correlated: they are not independent
+    # measurements. The straight-line fit treats every color as
+    # independent anyway, which makes the fit somewhat overconfident.
+    # That is acceptable for v1.
     return float(np.hypot((1.0 - fraction) * earlier_error, fraction * later_error))
 
 
 def _usable_error(error: float) -> bool:
-    """True when an error can be used as a weight: finite and not negative."""
-    return bool(np.isfinite(error) and error >= 0)
+    """True when an error is a real positive uncertainty.
+
+    Zero is not included. A reported error of zero would look like an
+    exact magnitude, and the fit would trust it more than any real
+    point. Zero is treated as unknown instead.
+    """
+    return bool(np.isfinite(error) and error > 0)
 
 
 def _fit_color_line(
     times: np.ndarray,
     colors: np.ndarray,
-    uncertainties: list[float | None],
-) -> tuple[float, float, bool] | None:
+    weights: np.ndarray | None,
+) -> tuple[float, float] | None:
     """Fit ``color = slope * time + intercept``.
 
-    Returns ``(slope, intercept, weighted)``. ``weighted`` is True when
-    the fit used ``w = 1/sigma``. It is False when the points were
-    weighted equally. Returns ``None`` when the fit does not produce a
-    finite line.
+    ``weights`` is what ``numpy.polyfit`` multiplies each point by.
+    ``None`` asks for an ordinary unweighted line. Returns ``None`` when
+    the fit does not produce a finite line.
 
-    ``numpy.polyfit`` treats ``w`` as a multiplier on each point, and the
-    statistical choice is ``w = 1/sigma``: a small uncertainty becomes a
-    large weight, so that point pulls the line harder. A missing
-    uncertainty, a negative one, or a set of uncertainties that are all
-    zero cannot be turned into weights. Zero is the noise-free demo,
-    which is exact on purpose. Those curves get an ordinary unweighted
-    line. A zero mixed in with real uncertainties is replaced by a tiny
-    floor, so the exact point is kept and trusted much more than a noisy
-    neighbor, without dividing by zero.
+    The statistical choice, made in ``_color_fit_weights``, is
+    ``w = 1/sigma``: a small uncertainty becomes a large weight, so that
+    point pulls the line harder.
     """
-    weights = _polyfit_weights(uncertainties)
     try:
         if weights is None:
             slope, intercept = np.polyfit(times, colors, 1)
@@ -730,7 +744,7 @@ def _fit_color_line(
     intercept = float(intercept)
     if not np.isfinite(slope) or not np.isfinite(intercept):
         return None
-    return slope, intercept, weights is not None
+    return slope, intercept
 
 
 def _format_mag(value: float) -> str:
@@ -746,19 +760,54 @@ def _format_mag(value: float) -> str:
     return text
 
 
-def _polyfit_weights(uncertainties: list[float | None]) -> np.ndarray | None:
-    """Return ``1/sigma`` weights, or None to ask for an unweighted fit."""
-    if any(uncertainty is None for uncertainty in uncertainties):
-        return None
-    sigmas = np.array(uncertainties, dtype=float)
-    if not np.all(np.isfinite(sigmas)) or np.any(sigmas < 0):
-        return None
-    if np.all(sigmas == 0.0):
-        return None
-    # 1e-6 mag is far smaller than any real survey error, so a point the
-    # table called exact still dominates, and 1/sigma stays finite.
-    safe = np.maximum(sigmas, 1e-6)
-    return 1.0 / safe
+# A positive uncertainty smaller than this is lifted up before 1/sigma
+# is taken. It is far below any real survey error. Zero is not lifted:
+# zero is unknown, and it takes the stand-in instead of a huge weight.
+_TINY_POSITIVE_ERROR = 1e-6
+
+
+def _color_fit_weights(
+    uncertainties: list[float | None],
+) -> tuple[np.ndarray | None, str]:
+    """Return ``1/sigma`` weights, and a sentence that says how.
+
+    A known uncertainty is finite and greater than zero. Missing, blank,
+    and zero are unknown. An unknown color stays in the fit. If at least
+    one color on the curve has a known uncertainty, each unknown color is
+    given that largest known uncertainty as a stand-in. A large
+    uncertainty is a small weight, so the unknown point cannot outvote a
+    precise one. That is the cautious choice.
+
+    If every color is unknown, there is no stand-in to copy. The weights
+    are ``None``, which means an ordinary unweighted line, and the
+    sentence says so.
+    """
+    known = [
+        float(uncertainty)
+        for uncertainty in uncertainties
+        if uncertainty is not None and _usable_error(float(uncertainty))
+    ]
+    if not known:
+        return None, (
+            "No color had a known uncertainty, so the fit weighted every color equally."
+        )
+
+    stand_in = max(known)
+    used_stand_in = False
+    sigmas: list[float] = []
+    for uncertainty in uncertainties:
+        if uncertainty is not None and _usable_error(float(uncertainty)):
+            sigmas.append(max(float(uncertainty), _TINY_POSITIVE_ERROR))
+        else:
+            used_stand_in = True
+            sigmas.append(max(stand_in, _TINY_POSITIVE_ERROR))
+    weights = 1.0 / np.array(sigmas, dtype=float)
+    if used_stand_in:
+        return weights, (
+            "A color with an unknown uncertainty was given a stand-in: "
+            "the largest known color uncertainty on this curve."
+        )
+    return weights, "Each color was weighted by one over its uncertainty."
 
 
 def _visit_times(*bands: pd.DataFrame) -> list[float]:
