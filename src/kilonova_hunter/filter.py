@@ -13,10 +13,10 @@ can read:
 - Color: after the peak, g minus r is redder than the cut in
   ``config.py``. That cut is still a placeholder. This is one moment
   in time, not a change.
-- Reddening: g minus r climbs by more than the cut in ``config.py``
-  between the earliest color and a later color inside a time window.
-  Those cuts are still placeholders. This is the "keeps getting redder"
-  check. If there are not two colors to compare, this rule is skipped.
+- Reddening: a straight line fitted to g minus r inside a time window
+  climbs by more than the cut in ``config.py``. Those cuts are still
+  placeholders. This is the "keeps getting redder" check. If there are
+  not two colors spread across the window, this rule is skipped.
 
 The fade rule and the color rule have to pass. The reddening rule has
 to pass when it can be measured. A fade or a color that cannot be
@@ -39,6 +39,7 @@ import pandas as pd
 from kilonova_hunter.config import THRESHOLDS, Thresholds, resolve_thresholds
 from kilonova_hunter.features import (
     ColorRise,
+    _format_mag,
     fade_rates,
     g_minus_r_at_time,
     g_minus_r_rise,
@@ -87,8 +88,8 @@ class CandidateVerdict:
             count as a failure and does not block the candidate.
         fade: The fast-fade rule.
         color: The red-color rule (g minus r at one time after the peak).
-        reddening: The "keeps getting redder" rule. g minus r has to
-            climb between two times.
+        reddening: The "keeps getting redder" rule. A straight line
+            through g minus r has to climb.
     """
 
     is_candidate: bool
@@ -256,16 +257,17 @@ def evaluate_reddening_rule(
 ) -> RuleResult:
     """Apply the "keeps getting redder" rule to one light curve.
 
-    g minus r should climb between the earliest color we can measure
-    and a later color inside the time window. The climb has to be
-    strictly larger than ``min_g_minus_r_rise``. A color that stays
-    the same, or gets bluer, fails.
+    g minus r should climb along a straight line fitted to every color
+    inside the time window. The climb has to be strictly larger than
+    ``min_g_minus_r_rise``. A color that stays the same, or gets bluer,
+    fails. The number is the fitted climb, so one noisy endpoint does
+    not decide it by itself.
 
-    If there are not two colors to compare, the rule is skipped.
-    ``passed`` is ``None``, and the sentence says why. One snapshot
-    can still be red. We only reject when we can see that the color
-    is not climbing. The fade rule and the single-time color rule do
-    not skip: too little data for those still fails them.
+    If there are not two colors spread across the window, the rule is
+    skipped. ``passed`` is ``None``, and the sentence says why. One
+    snapshot can still be red. We only reject when we can see that the
+    color is not climbing. The fade rule and the single-time color rule
+    do not skip: too little data for those still fails them.
 
     Args:
         light_curve: One object, with the usual light-curve columns.
@@ -291,27 +293,26 @@ def evaluate_reddening_rule(
             explanation=_skipped_reddening_sentence(change, settings),
         )
 
-    rise_text = f"{change.rise:.2f}"
+    rise_text = _format_mag(change.rise)
     cut_text = f"{settings.min_g_minus_r_rise:.2f}"
     span = (
         f"From day {change.earlier_time_days:.2f} to day "
-        f"{change.later_time_days:.2f}, g minus r went from "
-        f"{change.earlier_g_minus_r:.2f} to {change.later_g_minus_r:.2f}, "
-        f"a rise of {rise_text} mag, "
+        f"{change.later_time_days:.2f}, a straight-line fit of g minus r "
+        f"goes from {_format_mag(change.earlier_g_minus_r)} to "
+        f"{_format_mag(change.later_g_minus_r)}, a rise of {rise_text} mag, "
     )
     if change.rise > settings.min_g_minus_r_rise:
-        return RuleResult(
-            passed=True,
-            explanation=(
-                f"{span}which is more than {cut_text} mag, "
-                "so the reddening rule passes."
-            ),
-        )
+        ending = f"which is more than {cut_text} mag, so the reddening rule passes."
+    else:
+        ending = f"which is not more than {cut_text} mag, so the reddening rule fails."
+    # The note says whether every color had a real uncertainty, whether
+    # an unknown one was given a stand-in, or whether the fit gave up
+    # on weights because no uncertainty was known.
+    explanation = f"{span}{ending}"
+    if change.weighting_note:
+        explanation = f"{explanation} {change.weighting_note}"
     return RuleResult(
-        passed=False,
-        explanation=(
-            f"{span}which is not more than {cut_text} mag, so the reddening rule fails."
-        ),
+        passed=change.rise > settings.min_g_minus_r_rise, explanation=explanation
     )
 
 
