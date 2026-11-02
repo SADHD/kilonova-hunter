@@ -44,18 +44,22 @@ function:
   simple stand-in for a random sightline through the Galaxy, not a dust
   map. Bluer bands are dimmed more, using the Schlafly and Finkbeiner
   2011 coefficients for SDSS g, r, and i as a stand-in for Rubin.
-- The survey is not Rubin's real scheduler. Each of g, r, and i has its
-  own clock. Visits of one band are separated by a configurable gap
-  plus a random extra wait, so some nights are skipped. It is not the
-  smooth half-day curve the demo uses.
+- The default survey is a simple wide-fast-deep pattern, not Rubin's
+  real scheduler. A field is revisited every 2 to 4 nights. Each visit
+  is two exposures about 30 minutes apart, in two of g, r, and i
+  (pairs such as g+r, r+i, or g+i). The first visit is at a random
+  time in that gap, so the merger is not always just before a visit.
+  ``--cadence simple`` keeps the older pattern: each band on its own
+  clock, at least one day between visits of that band.
 - A point fainter than that band's limiting magnitude is a
-  non-detection and is dropped. The limits are 24.5 in g, 24.3 in r,
-  and 24.1 in i, inside the 24 to 24.5 single-visit range. The
-  magnitude error comes from that depth, and Gaussian noise of that
-  size is added to the points we keep.
-- "Within 3 days" is counted from the merger. The filter only sees
-  detections with time at most 3 days. The fake is caught when
-  ``is_kilonova_candidate`` is true on that shortened table.
+  non-detection and is dropped. The limits are the single-visit
+  5-sigma depths in Ivezić et al. 2019, Table 2: 24.81 in g, 24.35 in
+  r, and 23.92 in i. The magnitude error comes from that depth, and
+  Gaussian noise of that size is added to the points we keep.
+- "Within 3 days" is counted from the merger, not from the first
+  detection. The filter only sees detections with time at most 3 days
+  after the merger. The fake is caught when ``is_kilonova_candidate``
+  is true on that shortened table.
 - A fake with no detection at any simulated time is "never detected".
   That count is printed on its own and is also included in the
   denominator. A merger the survey never saw is a miss.
@@ -66,6 +70,8 @@ function:
 from __future__ import annotations
 
 import importlib.util
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from pathlib import Path
 
@@ -73,7 +79,16 @@ import numpy as np
 import pandas as pd
 
 from kilonova_hunter.config import THRESHOLDS
-from kilonova_hunter.filter import RuleResult, is_kilonova_candidate
+from kilonova_hunter.features import (
+    fade_rates,
+    g_minus_r_at_time,
+    g_minus_r_over_time,
+    g_minus_r_rise,
+    peak_time_days,
+)
+from kilonova_hunter.filter import format_verdict, is_kilonova_candidate
+
+logger = logging.getLogger(__name__)
 
 # The official recall number uses the test set. The tuning set is written
 # so the science lead can try cuts without looking at the test set.
@@ -86,19 +101,64 @@ TUNING_SEED = 1100
 TEST_SEED_OFFSET = 10000
 
 # How long after the merger a detection is allowed to count. The filter
-# is not shown anything later than this.
+# is not shown anything later than this. The clock is the merger, not
+# the first detection.
 CATCH_WITHIN_DAYS = 3.0
 
-# Rubin-like single-visit depths, in magnitudes. A larger number is a
-# fainter limit. All three sit inside the 24 to 24.5 range.
-LIMITING_MAGNITUDE = {"g": 24.5, "r": 24.3, "i": 24.1}
+# A wider window used only as context. It is not the official recall.
+CONTEXT_WINDOW_DAYS = 5.0
+
+# Stop the run if the light-curve model fails for more than this
+# fraction of the fakes. A broken model must not look like a low recall.
+MODEL_ERROR_ABORT_FRACTION = 0.20
+
+# Two visit times closer than this are one epoch. Thirty minutes is
+# much longer, so the two exposures in one wide-fast-deep visit count
+# as two epochs.
+_SAME_EPOCH_DAYS = 1e-4
+
+# A point that lands exactly on the window edge is kept when rounding
+# nudges it by less than this.
+_WINDOW_EDGE_DAYS = 1e-9
+
+# The default wide-fast-deep cadence, and the older per-band clock.
+CADENCE_WFD = "wfd"
+CADENCE_SIMPLE = "simple"
+
+# Single-visit 5-sigma point-source depths at zenith, AB magnitudes.
+# Ivezić et al. 2019, ApJ 873 111, arXiv:0805.2366, Table 2, row m5
+# (the parameters of their equations 5 and 6, for a 2 x 15 second
+# visit). These are the expected depths. The rounder design goals in
+# their Table 1 are g 25.0, r 24.7, and i 24.0. A larger number is a
+# fainter limit.
+LIMITING_MAGNITUDE = {"g": 24.81, "r": 24.35, "i": 23.92}
 
 # Schlafly and Finkbeiner 2011, SDSS, R_V = 3.1. How many magnitudes of
 # dimming one magnitude of E(B-V) causes. Used as a stand-in for Rubin.
 EXTINCTION_PER_EBV = {"g": 3.303, "r": 2.285, "i": 1.698}
 
 # sncosmo names for the Rubin bands redback understands.
-_REDSHIFT_BAND = {"g": "lsstg", "r": "lsstr", "i": "lssti"}
+_SNCOSMO_BANDS = {"g": "lsstg", "r": "lsstr", "i": "lssti"}
+
+# Wide-fast-deep visit pairs. Each night uses one pair, in either order.
+_WFD_PAIRS = (("g", "r"), ("r", "i"), ("g", "i"))
+
+# 30 minutes, in days. The two exposures in one visit are this far apart.
+_THIRTY_MINUTES_DAYS = 30.0 / (24.0 * 60.0)
+
+# Failures a kilonova model is allowed to raise for one unlucky draw.
+# Anything else is a bug and should stop the run with a traceback.
+_MODEL_FAILURES = (
+    ArithmeticError,
+    FloatingPointError,
+    OverflowError,
+    RuntimeError,
+    ValueError,
+    np.linalg.LinAlgError,
+)
+
+# A function (times, bands, event) -> one magnitude per visit.
+LightCurveModel = Callable[[np.ndarray, np.ndarray, "FakeEvent"], np.ndarray]
 
 # Distance bins for the breakdown, in Mpc of luminosity distance.
 # The last edge is above the default maximum so the far bin has a home.
@@ -184,34 +244,57 @@ class SurveySettings:
     """How the fake survey visits the sky. Not the filter cuts.
 
     Attributes:
-        bands: Filters that get their own visit clock.
-        revisit_gap_days: The minimum wait between two visits of the
-            same band.
-        nightly_gap_days: An extra random wait, uniform from 0 up to
-            this many days, added on top of the revisit gap. That is
-            the skipped night.
-        survey_length_days: How long to keep generating visits. The
-            filter still only sees the first ``catch_within_days``.
-        catch_within_days: Detections later than this are hidden from
-            the filter.
+        cadence: ``"wfd"`` (the default) or ``"simple"``. Wide-fast-deep
+            revisits a field every few nights and takes two filters
+            half an hour apart. Simple gives each band its own clock.
+        wfd_gap_min_days: Shortest wait between wide-fast-deep visits.
+        wfd_gap_max_days: Longest wait between those visits. The first
+            visit is also placed at random between 0 and this number,
+            which is the start phase relative to the merger.
+        revisit_gap_days: For the simple cadence, the minimum wait
+            between two visits of the same band.
+        nightly_gap_days: For the simple cadence, an extra random wait
+            on top of the revisit gap.
+        survey_length_days: How long to keep generating visits. Eight
+            days leaves room for a 5-day context window. The official
+            filter still only sees ``catch_within_days``.
+        catch_within_days: Detections later than this, counted from the
+            merger, are hidden from the filter.
         limits: Faintest magnitude that still counts as a detection,
             per band.
         error_floor_mag: Smallest magnitude error we will store. A very
             bright source would otherwise get an error of nearly zero.
+        model_error_abort_fraction: Stop the run if the light-curve
+            model fails for more than this fraction of the fakes.
     """
 
+    cadence: str = CADENCE_WFD
+    wfd_gap_min_days: float = 2.0
+    wfd_gap_max_days: float = 4.0
     bands: tuple[str, ...] = ("g", "r", "i")
     revisit_gap_days: float = 1.0
     nightly_gap_days: float = 1.0
-    survey_length_days: float = 6.0
+    survey_length_days: float = 8.0
     catch_within_days: float = CATCH_WITHIN_DAYS
     limits: dict[str, float] | None = None
     error_floor_mag: float = _ERROR_FLOOR_MAG
+    model_error_abort_fraction: float = MODEL_ERROR_ABORT_FRACTION
 
     def __post_init__(self) -> None:
         """Fill the default limits and reject a survey that cannot visit."""
         if self.limits is None:
             object.__setattr__(self, "limits", dict(LIMITING_MAGNITUDE))
+        if self.cadence not in {CADENCE_WFD, CADENCE_SIMPLE}:
+            raise ValueError(
+                f"cadence must be {CADENCE_WFD!r} or {CADENCE_SIMPLE!r}, "
+                f"got {self.cadence!r}."
+            )
+        if self.wfd_gap_min_days <= 0 or self.wfd_gap_max_days < self.wfd_gap_min_days:
+            raise ValueError(
+                "the wide-fast-deep gap must be positive and the maximum "
+                f"must be at least the minimum, got {self.wfd_gap_min_days} "
+                f"to {self.wfd_gap_max_days} days."
+            )
         if self.revisit_gap_days <= 0:
             raise ValueError(
                 f"revisit_gap_days must be positive, got {self.revisit_gap_days}."
@@ -224,6 +307,11 @@ class SurveySettings:
             raise ValueError("survey length and the catch window must be positive.")
         if not self.bands:
             raise ValueError("the survey needs at least one band.")
+        if not 0.0 <= self.model_error_abort_fraction <= 1.0:
+            raise ValueError(
+                "model_error_abort_fraction must be between 0 and 1, "
+                f"got {self.model_error_abort_fraction}."
+            )
 
     def limit_for(self, band: str) -> float:
         """The detection limit for one band."""
@@ -478,6 +566,21 @@ def sample_redshifts_and_distances(
     return np.asarray(redshifts, dtype=float), np.asarray(distances, dtype=float)
 
 
+def times_in_window(times: np.ndarray, window_days: float) -> np.ndarray:
+    """True for each time that is at most ``window_days`` after the merger.
+
+    The times are already days since the merger. The window does not
+    start at the first detection. A tiny margin keeps a point that lands
+    exactly on the edge when floating-point rounding nudges it.
+    """
+    return np.asarray(times, dtype=float) <= window_days + _WINDOW_EDGE_DAYS
+
+
+def time_is_in_window(time_days: float, window_days: float) -> bool:
+    """True when one time is inside the merger window. See ``times_in_window``."""
+    return bool(times_in_window(np.array([time_days]), window_days)[0])
+
+
 def visit_times_for_one_band(
     rng: np.random.Generator,
     *,
@@ -503,13 +606,61 @@ def survey_visits(
     rng: np.random.Generator,
     survey: SurveySettings,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Every visit of every band, as parallel time and band arrays."""
+    """Every visit, as parallel time and band arrays.
+
+    ``survey.cadence`` picks the pattern. ``"wfd"`` is the default
+    wide-fast-deep pattern. ``"simple"`` is one clock per band.
+    """
+    if survey.cadence == CADENCE_WFD:
+        return _wfd_visits(rng, survey)
+    return _simple_visits(rng, survey)
+
+
+def _wfd_visits(
+    rng: np.random.Generator,
+    survey: SurveySettings,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Wide-fast-deep visits: two filters, then a gap of a few nights.
+
+    The first visit is a random phase between 0 and the longest gap, so
+    the merger can fall in the middle of a gap. Each later visit waits a
+    fresh random gap between the shortest and longest gap. On that night
+    the survey takes two exposures about 30 minutes apart, in a random
+    pair drawn from g+r, r+i, and g+i, in either order.
+    """
+    times: list[float] = []
+    bands: list[str] = []
+    clock = float(rng.uniform(0.0, survey.wfd_gap_max_days))
+    while clock <= survey.survey_length_days:
+        pair = _WFD_PAIRS[int(rng.integers(0, len(_WFD_PAIRS)))]
+        if float(rng.random()) < 0.5:
+            pair = (pair[1], pair[0])
+        for offset, band in ((0.0, pair[0]), (_THIRTY_MINUTES_DAYS, pair[1])):
+            when = clock + offset
+            if when <= survey.survey_length_days:
+                times.append(when)
+                bands.append(band)
+        gap = float(rng.uniform(survey.wfd_gap_min_days, survey.wfd_gap_max_days))
+        clock += gap
+    if not times:
+        return np.array([], dtype=float), np.array([], dtype=str)
+    order = np.argsort(times, kind="stable")
+    return np.array(times, dtype=float)[order], np.array(bands, dtype=str)[order]
+
+
+def _simple_visits(
+    rng: np.random.Generator,
+    survey: SurveySettings,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One independent clock per band. This is ``--cadence simple``."""
     times: list[float] = []
     bands: list[str] = []
     for band in survey.bands:
         for time_days in visit_times_for_one_band(rng, survey=survey):
             times.append(float(time_days))
             bands.append(band)
+    if not times:
+        return np.array([], dtype=float), np.array([], dtype=str)
     order = np.argsort(times, kind="stable")
     return np.array(times, dtype=float)[order], np.array(bands, dtype=str)[order]
 
@@ -566,14 +717,15 @@ def light_curve_for_the_filter(
     observed: pd.DataFrame,
     within_days: float = CATCH_WITHIN_DAYS,
 ) -> pd.DataFrame:
-    """The rows the filter is allowed to see: time at most ``within_days``.
+    """Rows the filter may see: at most ``within_days`` after the merger.
 
-    A point exactly at the limit is kept. A point later than the limit
-    is hidden, even if the survey detected it.
+    The clock is the merger. A first detection on day 4 is not "within
+    3 days" just because nothing came before it. A point exactly on the
+    edge is kept. A later point is hidden even if the survey detected it.
     """
     if observed.empty:
         return observed.copy()
-    kept = observed.loc[observed["time_days"] <= within_days + 1e-9]
+    kept = observed.loc[times_in_window(observed["time_days"].to_numpy(), within_days)]
     return kept.reset_index(drop=True)
 
 
@@ -704,7 +856,7 @@ def redback_magnitudes(
         two_component_kilonova_model,
     )
 
-    sn_bands = np.array([_REDSHIFT_BAND[str(band)] for band in bands])
+    sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
     shared = {
         "bands": sn_bands,
         "output_format": "magnitude",
@@ -785,29 +937,202 @@ def draw_population(
     return events
 
 
+def _peak_magnitudes(bands: np.ndarray, magnitudes: np.ndarray) -> dict[str, float]:
+    """Brightest true magnitude in each band. Smallest magnitude is brightest."""
+    peaks: dict[str, float] = {}
+    for band in ("g", "r", "i"):
+        chosen = magnitudes[np.asarray(bands) == band]
+        finite = chosen[np.isfinite(chosen)]
+        peaks[band] = float(np.min(finite)) if len(finite) else float("nan")
+    return peaks
+
+
+def _epoch_count(times: np.ndarray) -> int:
+    """How many distinct visit times are in ``times``.
+
+    Two rows at the same time are one epoch. Two exposures 30 minutes
+    apart are two epochs.
+    """
+    if len(times) == 0:
+        return 0
+    ordered = np.sort(np.asarray(times, dtype=float))
+    count = 1
+    previous = float(ordered[0])
+    for time_days in ordered[1:]:
+        if float(time_days) - previous > _SAME_EPOCH_DAYS:
+            count += 1
+            previous = float(time_days)
+    return count
+
+
+def _blank_diagnosis(window_days: float) -> dict[str, object]:
+    """Score columns for a fake the filter was not shown."""
+    return {
+        "n_detections_in_window": 0,
+        "window_days": window_days,
+        "judgeable": False,
+        "is_candidate": False,
+        "fade_result": "",
+        "color_result": "",
+        "reddening_result": "",
+        "fade_rate_mag_per_day": float("nan"),
+        "g_minus_r": float("nan"),
+        "reddening_rise_mag": float("nan"),
+    }
+
+
+def diagnose_catch_window(
+    observed: pd.DataFrame,
+    window_days: float,
+) -> dict[str, object]:
+    """Measure the rules on detections inside ``window_days`` of the merger.
+
+    The window starts at the merger. ``judgeable`` is true when there
+    are at least two epochs and at least one g minus r color, so the
+    fade rule and the color rule can both be measured. A reddening
+    result of ``skipped`` means there were not two colors to fit. That
+    does not reject the object. Fade and color use ``not_enough_data``
+    instead of skipping: too little data fails those two rules.
+    ``below_cut`` means the number was measured and it was on the wrong
+    side of the placeholder cut.
+    """
+    visible = light_curve_for_the_filter(observed, window_days)
+    if visible.empty:
+        return _blank_diagnosis(window_days)
+
+    rates = fade_rates(visible)
+    measured_rates = [
+        rate.mag_per_day for rate in rates.values() if rate.mag_per_day is not None
+    ]
+    fade_rate = float(max(measured_rates)) if measured_rates else float("nan")
+    if not np.isfinite(fade_rate):
+        fade_result = "not_enough_data"
+    elif fade_rate > THRESHOLDS.fade_faster_than_mag_per_day:
+        fade_result = "pass"
+    else:
+        fade_result = "below_cut"
+
+    peak = peak_time_days(visible, "r")
+    color_value = float("nan")
+    if peak is not None:
+        color = g_minus_r_at_time(visible, peak + THRESHOLDS.color_days_after_peak)
+        if color.g_minus_r is not None:
+            color_value = float(color.g_minus_r)
+    if not np.isfinite(color_value):
+        color_result = "not_enough_data"
+    elif color_value > THRESHOLDS.redder_than_g_minus_r:
+        color_result = "pass"
+    else:
+        color_result = "below_cut"
+
+    change = g_minus_r_rise(visible)
+    rise_value = float(change.rise) if change.rise is not None else float("nan")
+    if not np.isfinite(rise_value):
+        reddening_result = "skipped"
+    elif rise_value > THRESHOLDS.min_g_minus_r_rise:
+        reddening_result = "pass"
+    else:
+        reddening_result = "below_cut"
+
+    judgeable = _epoch_count(visible["time_days"].to_numpy()) >= 2 and (
+        len(g_minus_r_over_time(visible)) >= 1
+    )
+    verdict = is_kilonova_candidate(visible)
+    return {
+        "n_detections_in_window": int(len(visible)),
+        "window_days": window_days,
+        "judgeable": judgeable,
+        "is_candidate": bool(verdict.is_candidate),
+        "fade_result": fade_result,
+        "color_result": color_result,
+        "reddening_result": reddening_result,
+        "fade_rate_mag_per_day": fade_rate,
+        "g_minus_r": color_value,
+        "reddening_rise_mag": rise_value,
+    }
+
+
+def _candidate_in_window(observed: pd.DataFrame, window_days: float) -> bool:
+    """Whether the filter would catch the fake inside a different window.
+
+    Used for the 5-day context number. It is not the official recall.
+    The window is still counted from the merger.
+    """
+    visible = light_curve_for_the_filter(observed, window_days)
+    if visible.empty:
+        return False
+    return bool(is_kilonova_candidate(visible).is_candidate)
+
+
+def _abort_if_model_is_broken(n_failed: int, n_total: int, limit: float) -> None:
+    """Stop if the model failed for more than ``limit`` of the fakes.
+
+    A broken model must not be reported as a low recall. Each failure
+    has already been written to the log with its reason.
+    """
+    if n_total <= 0:
+        return
+    fraction = n_failed / n_total
+    if fraction > limit:
+        raise RuntimeError(
+            "The light-curve model failed for "
+            f"{n_failed} of {n_total} fakes "
+            f"({100.0 * fraction:.0f}%), which is more than "
+            f"{100.0 * limit:.0f}%. "
+            "That is a broken model, not a survey that missed them. "
+            "The recall was not computed. "
+            "Each failure, and its reason, is in the log just above."
+        )
+
+
 def simulate_event(
     event: FakeEvent,
     survey: SurveySettings,
     rng: np.random.Generator,
-    model,
-) -> tuple[pd.DataFrame, bool]:
-    """Sample one fake and return ``(detections, model_failed)``.
+    model: LightCurveModel,
+) -> tuple[pd.DataFrame, str | None, dict[str, float]]:
+    """Sample one fake.
 
-    ``model`` is a function ``(times, bands, event) -> magnitudes``.
-    The stub in the tests is one. ``redback_magnitudes`` is the other.
-    A model that raises is recorded as a failure and produces no
-    detections, so the fake counts as never detected instead of
-    aborting the whole list.
+    Returns ``(detections, error_reason, peak_magnitude)``.
+
+    ``model`` is ``(times, bands, event) -> magnitudes``. The stub in
+    the tests is one. ``redback_magnitudes`` is the other.
+
+    ``error_reason`` is ``None`` when the model ran. A model that raises
+    one of the expected failures, or that returns the wrong number of
+    magnitudes, is logged and returned as an error reason. That fake is
+    not called "never detected": the survey was never asked. If most
+    fakes fail this way, ``build_recall_set`` stops the run.
+
+    ``peak_magnitude`` is the brightest true magnitude at a visit in
+    each band, before the depth cut and before noise. Brightest means
+    the smallest magnitude. It is NaN when that band was not visited or
+    the model failed.
     """
+    empty_peaks = {band: float("nan") for band in ("g", "r", "i")}
     times, bands = survey_visits(rng, survey)
     if len(times) == 0:
-        return _empty_curve(), False
+        return _empty_curve(), None, empty_peaks
     try:
         true_magnitudes = np.asarray(model(times, bands, event), dtype=float)
-    except Exception:
-        return _empty_curve(), True
-    if len(true_magnitudes) != len(times):
-        return _empty_curve(), True
+    except _MODEL_FAILURES as error:
+        reason = f"{type(error).__name__}: {error}"
+        logger.warning(
+            "Fake %s: the light-curve model failed (%s).",
+            event.object_id,
+            reason,
+        )
+        return _empty_curve(), reason, empty_peaks
+    if true_magnitudes.shape != (len(times),):
+        reason = (
+            f"the model returned {true_magnitudes.shape} values for {len(times)} visits"
+        )
+        logger.warning(
+            "Fake %s: the light-curve model failed (%s).",
+            event.object_id,
+            reason,
+        )
+        return _empty_curve(), reason, empty_peaks
     observed = observe_visits(
         times,
         bands,
@@ -815,7 +1140,7 @@ def simulate_event(
         survey=survey,
         rng=rng,
     )
-    return observed, False
+    return observed, None, _peak_magnitudes(bands, true_magnitudes)
 
 
 def score_observed_curve(
@@ -871,7 +1196,7 @@ def build_recall_set(
     set_name: str,
     population: PopulationSettings,
     survey: SurveySettings,
-    model,
+    model: LightCurveModel,
     rng: np.random.Generator | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, RecallNumbers]:
     """Draw a set, observe it, and score it.
@@ -891,31 +1216,53 @@ def build_recall_set(
         # so one event's cadence does not depend on how long the
         # previous model call took.
         event_rng = np.random.default_rng(int(draw.integers(0, 2**31 - 1)))
-        observed, model_failed = simulate_event(event, survey, event_rng, model)
-        never, caught, n_visible = score_observed_curve(
-            observed,
-            within_days=survey.catch_within_days,
-        )
+        observed, error_reason, peaks = simulate_event(event, survey, event_rng, model)
+        model_failed = error_reason is not None
         if model_failed:
-            never = True
-            caught = False
+            # A broken model is not "the survey never saw it".
+            never = False
+            diagnosis = _blank_diagnosis(survey.catch_within_days)
+            caught_later = False
+        else:
+            never = observed.empty
+            diagnosis = diagnose_catch_window(observed, survey.catch_within_days)
+            caught_later = _candidate_in_window(observed, CONTEXT_WINDOW_DAYS)
         event_rows.append(
             _event_row(
                 event,
                 never_detected=never,
-                is_candidate=caught,
-                n_visible=n_visible,
+                is_candidate=bool(diagnosis["is_candidate"]),
+                n_detections_in_window=int(diagnosis["n_detections_in_window"]),
+                window_days=float(diagnosis["window_days"]),
                 model_failed=model_failed,
+                model_error_reason="" if error_reason is None else error_reason,
+                judgeable=bool(diagnosis["judgeable"]),
+                fade_result=str(diagnosis["fade_result"]),
+                color_result=str(diagnosis["color_result"]),
+                reddening_result=str(diagnosis["reddening_result"]),
+                fade_rate_mag_per_day=diagnosis["fade_rate_mag_per_day"],
+                g_minus_r=diagnosis["g_minus_r"],
+                reddening_rise_mag=diagnosis["reddening_rise_mag"],
+                is_candidate_5day=caught_later,
+                peak_mag_g=peaks["g"],
+                peak_mag_r=peaks["r"],
+                peak_mag_i=peaks["i"],
             )
         )
         if not observed.empty:
             frame = observed.copy()
             frame.insert(0, "object_id", event.object_id)
-            frame["within_catch_window"] = frame["time_days"] <= (
-                survey.catch_within_days + 1e-9
+            frame["within_catch_window"] = times_in_window(
+                frame["time_days"].to_numpy(),
+                survey.catch_within_days,
             )
             curve_frames.append(frame)
     events_table = pd.DataFrame(event_rows)
+    _abort_if_model_is_broken(
+        int(events_table["model_failed"].sum()),
+        len(events_table),
+        survey.model_error_abort_fraction,
+    )
     if curve_frames:
         curves = pd.concat(curve_frames, ignore_index=True)
     else:
@@ -950,8 +1297,9 @@ def run_recall(
     set_size: int = 200,
     seed: int | None = None,
     output_dir: Path | str = Path("data") / "recall",
-    model=None,
+    model: LightCurveModel | None = None,
     survey: SurveySettings | None = None,
+    cadence: str = CADENCE_WFD,
 ) -> str:
     """Build the requested sets, the sanity fake, and the plain-English report.
 
@@ -967,9 +1315,9 @@ def run_recall(
         raise ValueError(f"which must be tuning, test, or both, got {which!r}.")
     if model is None:
         model = redback_magnitudes
-    sky = survey if survey is not None else SurveySettings()
+    sky = survey if survey is not None else SurveySettings(cadence=cadence)
     destination = Path(output_dir)
-    set_reports: list[RecallNumbers] = []
+    set_reports: list[tuple[RecallNumbers, pd.DataFrame]] = []
     for set_name, set_seed in _seeds_for(which, seed):
         population = PopulationSettings(count=set_size, seed=set_seed)
         events, curves, numbers = build_recall_set(
@@ -979,7 +1327,7 @@ def run_recall(
             model=model,
         )
         write_recall_tables(destination / set_name, events, curves)
-        set_reports.append(numbers)
+        set_reports.append((numbers, events))
 
     sanity_text, sanity_candidate = _write_sanity_fake(destination, sky, model)
     text = format_recall_report(
@@ -987,6 +1335,7 @@ def run_recall(
         sanity_text=sanity_text,
         sanity_is_candidate=sanity_candidate,
         output_dir=destination,
+        cadence=sky.cadence,
     )
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "report.txt").write_text(text + "\n", encoding="utf-8")
@@ -994,14 +1343,15 @@ def run_recall(
 
 
 def format_recall_report(
-    sets: list[RecallNumbers],
+    sets: list[tuple[RecallNumbers, pd.DataFrame]],
     *,
     sanity_text: str,
     sanity_is_candidate: bool,
     output_dir: Path,
+    cadence: str = CADENCE_WFD,
 ) -> str:
     """Turn the scores into the paragraphs ``kilohunt recall`` prints."""
-    by_name = {item.set_name: item for item in sets}
+    by_name = {item.set_name: (item, events) for item, events in sets}
     lines: list[str] = []
     lines.append(
         "Recall uses the placeholder cuts in config.py. They have not been tuned."
@@ -1018,14 +1368,33 @@ def format_recall_report(
         "so cuts can be tried without looking at the test set."
     )
     lines.append(f"Tables are in {output_dir}.")
+    lines.append(_cadence_sentence(cadence))
+    lines.append(
+        "Detection limits are the single-visit 5-sigma depths from "
+        "Ivezić et al. 2019, Table 2: "
+        f"g {LIMITING_MAGNITUDE['g']:.2f}, "
+        f"r {LIMITING_MAGNITUDE['r']:.2f}, "
+        f"i {LIMITING_MAGNITUDE['i']:.2f}."
+    )
+    lines.append(
+        "Within 3 days is counted from the merger, not from the first "
+        "detection. A point on day 4 is too late even if the survey had "
+        "not seen the object before."
+    )
     lines.append("")
     if TEST_SET in by_name:
-        lines.extend(_set_paragraphs(by_name[TEST_SET], official=True))
+        numbers, events = by_name[TEST_SET]
+        lines.extend(_set_paragraphs(numbers, official=True, events=events))
     if TUNING_SET in by_name:
         if TEST_SET in by_name:
             lines.append("")
+        numbers, events = by_name[TUNING_SET]
         lines.extend(
-            _set_paragraphs(by_name[TUNING_SET], official=TEST_SET not in by_name)
+            _set_paragraphs(
+                numbers,
+                official=TEST_SET not in by_name,
+                events=events,
+            )
         )
     lines.append("")
     verdict = "CANDIDATE" if sanity_is_candidate else "NOT A CANDIDATE"
@@ -1039,7 +1408,12 @@ def format_recall_report(
     return "\n".join(lines)
 
 
-def _set_paragraphs(numbers: RecallNumbers, *, official: bool) -> list[str]:
+def _set_paragraphs(
+    numbers: RecallNumbers,
+    *,
+    official: bool,
+    events: pd.DataFrame | None = None,
+) -> list[str]:
     """The sentences for one set."""
     label = "Test set" if numbers.set_name == TEST_SET else "Tuning set"
     if official and numbers.set_name == TEST_SET:
@@ -1072,8 +1446,10 @@ def _set_paragraphs(numbers: RecallNumbers, *, official: bool) -> list[str]:
     )
     if numbers.n_model_failed:
         lines.append(
-            f"The light-curve model failed for {numbers.n_model_failed} "
-            "fake(s). Those are included in 'never detected'."
+            f"Light-curve model errors: {numbers.n_model_failed}. "
+            "These are not counted as never detected. Each one was logged "
+            "with its reason. The run stops if more than "
+            f"{100.0 * MODEL_ERROR_ABORT_FRACTION:.0f}% of a set fails this way."
         )
     lines.append(
         "Recall by luminosity-distance bin (never detected stay in the denominator)."
@@ -1093,37 +1469,226 @@ def _set_paragraphs(numbers: RecallNumbers, *, official: bool) -> list[str]:
                 f"{bin_.n_never_detected} never detected"
             )
         lines.append(f"  {bin_.low_mpc:.0f} to {bin_.high_mpc:.0f} Mpc: {caught_text}")
+    if events is not None:
+        lines.extend(_diagnostic_lines(events))
     return lines
 
 
+def _cadence_sentence(cadence: str) -> str:
+    """One sentence naming which visit pattern this report used."""
+    if cadence == CADENCE_WFD:
+        return (
+            "Cadence: wide-fast-deep style, which is the default. "
+            "A field is visited every 2 to 4 nights. Each visit is two "
+            "exposures about 30 minutes apart, in two of g, r, and i. "
+            "The first visit is at a random time in that gap."
+        )
+    return (
+        "Cadence: simple, not the default. Each of g, r, and i has its "
+        "own clock, with at least one day between visits of that band "
+        "plus a random extra wait."
+    )
+
+
+def _diagnostic_lines(events: pd.DataFrame) -> list[str]:
+    """The breakdown Science Lead asked for. Empty if the columns are absent."""
+    if "judgeable" not in events.columns or events.empty:
+        return []
+    lines: list[str] = [""]
+    total = int(len(events))
+    judgeable = events["judgeable"].astype(bool)
+    n_judge = int(judgeable.sum())
+    caught_judge = int((judgeable & events["is_candidate"].astype(bool)).sum())
+    lines.append(
+        f"Judgeable fakes: {n_judge} of {total}. "
+        "A fake is judgeable when the first 3 days after the merger "
+        "hold at least two detections at different times and at least "
+        "one g minus r color, so the fade rule and the color rule can "
+        "both be measured."
+    )
+    if n_judge:
+        low, high = wilson_interval(caught_judge, n_judge)
+        percent = 100.0 * caught_judge / n_judge
+        lines.append(
+            f"Judgeable recall: {caught_judge} of {n_judge} ({percent:.1f}%). "
+            "95% confidence interval: "
+            f"{100.0 * low:.1f}% to {100.0 * high:.1f}%."
+        )
+    else:
+        lines.append("Judgeable recall: no fake had enough visits to be judged.")
+    lines.append(
+        "The official recall above counts every fake, including ones the "
+        "survey barely visited. If the judgeable recall is high and the "
+        "official recall is low, the visit pattern is the limit, not the "
+        "filter cuts."
+    )
+    lines.append(
+        "How the rules came out, for fakes with at least one detection "
+        "in the 3 days after the merger:"
+    )
+    shown = events["n_detections_in_window"] > 0
+    n_shown = int(shown.sum())
+    lines.append(f"  Shown to the filter: {n_shown} of {total}.")
+    for name, column in (
+        ("Fade", "fade_result"),
+        ("Color", "color_result"),
+        ("Reddening", "reddening_result"),
+    ):
+        lines.append(f"  {name}: {_rule_tally(events.loc[shown, column])}")
+    lines.append(
+        "  not_enough_data means the rule failed because it could not be "
+        "measured. below_cut means it was measured and landed on the wrong "
+        "side of the placeholder cut. skipped (reddening only) means there "
+        "were not two colors to fit, which does not by itself reject the object."
+    )
+    if "is_candidate_5day" in events.columns and total:
+        caught_later = int(events["is_candidate_5day"].astype(bool).sum())
+        low, high = wilson_interval(caught_later, total)
+        percent = 100.0 * caught_later / total
+        lines.append(
+            "If the window were 5 days after the merger instead of 3, "
+            f"the filter would catch {caught_later} of {total} ({percent:.1f}%). "
+            "95% confidence interval: "
+            f"{100.0 * low:.1f}% to {100.0 * high:.1f}%. "
+            "That is context only. It is not the official recall."
+        )
+    lines.extend(_quantile_lines(events))
+    lines.extend(_detection_bin_lines(events))
+    return lines
+
+
+def _rule_tally(results: pd.Series) -> str:
+    """One line of pass / not enough data / below the cut / skipped."""
+
+    def count(label: str) -> int:
+        return int((results == label).sum())
+
+    return (
+        f"{count('pass')} pass, "
+        f"{count('not_enough_data')} not enough data, "
+        f"{count('below_cut')} below the cut, "
+        f"{count('skipped')} skipped"
+    )
+
+
+def _quantile_lines(events: pd.DataFrame) -> list[str]:
+    """10/50/90 percent points for the measured numbers and the peaks."""
+    lines = ["Measured numbers, as the 10th, 50th, and 90th percent points:"]
+    usable = ~events["model_failed"].astype(bool)
+    detections = events.loc[usable, "n_detections_in_window"].to_numpy(dtype=float)
+    lines.append(
+        "  Detections per fake in the first 3 days after the merger "
+        f"(including zeros): {_format_quantiles(detections)}."
+    )
+    lines.append(
+        "  Fastest fade, in mag/day, where a fade could be measured: "
+        f"{_format_quantiles(events['fade_rate_mag_per_day'].to_numpy(dtype=float))}."
+    )
+    lines.append(
+        "  g minus r one day after the r-band peak, where it could be measured: "
+        f"{_format_quantiles(events['g_minus_r'].to_numpy(dtype=float))}."
+    )
+    lines.append(
+        "True peak magnitude at a visit, before faint points are dropped "
+        "(a smaller number is brighter):"
+    )
+    for band in ("g", "r", "i"):
+        column = events[f"peak_mag_{band}"].to_numpy(dtype=float)
+        lines.append(f"  {band}: {_format_quantiles(column)}.")
+    near = events.loc[
+        usable & (events["distance_mpc"] >= 250.0) & (events["distance_mpc"] < 350.0)
+    ]
+    lines.append(
+        "  Same peaks for fakes with luminosity distance 250 to 350 Mpc "
+        "(a 2017-like kilonova at 300 Mpc is expected near 21.5 to 22):"
+    )
+    if near.empty:
+        lines.append("    none in this distance slice.")
+    else:
+        for band in ("g", "r", "i"):
+            lines.append(
+                f"    {band}: "
+                f"{_format_quantiles(near[f'peak_mag_{band}'].to_numpy(dtype=float))}."
+            )
+    return lines
+
+
+def _format_quantiles(values: np.ndarray) -> str:
+    """``10% / 50% / 90%`` or a short note when there is nothing to summarize."""
+    clean = np.asarray(values, dtype=float)
+    clean = clean[np.isfinite(clean)]
+    if len(clean) == 0:
+        return "not measured"
+    low, middle, high = np.quantile(clean, [0.1, 0.5, 0.9])
+    return f"{low:.2f} / {middle:.2f} / {high:.2f} (n={len(clean)})"
+
+
+def _detection_bin_lines(events: pd.DataFrame) -> list[str]:
+    """Recall by how many detections fell inside the 3-day window."""
+    usable = events.loc[~events["model_failed"].astype(bool)]
+    lines = [
+        "Recall by number of detections in the first 3 days after the merger "
+        "(never detected stay in the 0 bin; model errors are left out):"
+    ]
+    order = ("0", "1", "2", "3-4", "5+")
+    labels = usable["n_detections_in_window"].map(_detection_bin_label)
+    for label in order:
+        chosen = usable.loc[labels == label]
+        total = int(len(chosen))
+        if total == 0:
+            lines.append(f"  {label} detections: none")
+            continue
+        caught = int(chosen["is_candidate"].astype(bool).sum())
+        percent = 100.0 * caught / total
+        noun = "detection" if label == "1" else "detections"
+        lines.append(f"  {label} {noun}: {caught}/{total} ({percent:.1f}%)")
+    return lines
+
+
+def _detection_bin_label(count: int) -> str:
+    """Bucket a detection count as 0, 1, 2, 3-4, or 5+."""
+    if count <= 2:
+        return str(int(count))
+    if count <= 4:
+        return "3-4"
+    return "5+"
+
+
 def _write_sanity_fake(
-    destination: Path, survey: SurveySettings, model
+    destination: Path,
+    survey: SurveySettings,
+    model: LightCurveModel,
 ) -> tuple[str, bool]:
     """Observe the AT2017gfo-like fake and return its verdict text."""
     event = at2017gfo_like_event()
     # 2017 is fixed so this one object does not change when the set seed changes.
     rng = np.random.default_rng(2017)
-    observed, model_failed = simulate_event(event, survey, rng, model)
-    visible = light_curve_for_the_filter(observed, survey.catch_within_days)
+    observed, error_reason, peaks = simulate_event(event, survey, rng, model)
+    model_failed = error_reason is not None
     if model_failed:
-        text = "The light-curve model failed, so there is no verdict."
-        candidate = False
-    elif visible.empty:
-        text = (
-            "No detection within "
-            f"{survey.catch_within_days:.0f} days, so the filter was not "
-            "shown a light curve."
-        )
-        candidate = False
+        text = f"The light-curve model failed ({error_reason}), so there is no verdict."
+        diagnosis = _blank_diagnosis(survey.catch_within_days)
+        never = False
+        caught_later = False
     else:
-        verdict = is_kilonova_candidate(visible)
-        candidate = bool(verdict.is_candidate)
-        text = _format_verdict(verdict)
+        diagnosis = diagnose_catch_window(observed, survey.catch_within_days)
+        caught_later = _candidate_in_window(observed, CONTEXT_WINDOW_DAYS)
+        never = observed.empty
+        if int(diagnosis["n_detections_in_window"]) == 0:
+            text = (
+                "No detection within "
+                f"{survey.catch_within_days:.0f} days of the merger, "
+                "so the filter was not shown a light curve."
+            )
+        else:
+            visible = light_curve_for_the_filter(observed, survey.catch_within_days)
+            text = format_verdict(is_kilonova_candidate(visible))
     frame = observed.copy()
     if not frame.empty:
         frame.insert(0, "object_id", event.object_id)
-        frame["within_catch_window"] = (
-            frame["time_days"] <= survey.catch_within_days + 1e-9
+        frame["within_catch_window"] = times_in_window(
+            frame["time_days"].to_numpy(),
+            survey.catch_within_days,
         )
     else:
         frame = pd.DataFrame(
@@ -1138,13 +1703,26 @@ def _write_sanity_fake(
         )
     row = _event_row(
         event,
-        never_detected=observed.empty or model_failed,
-        is_candidate=candidate,
-        n_visible=int(len(visible)),
+        never_detected=never,
+        is_candidate=bool(diagnosis["is_candidate"]),
+        n_detections_in_window=int(diagnosis["n_detections_in_window"]),
+        window_days=float(diagnosis["window_days"]),
         model_failed=model_failed,
+        model_error_reason="" if error_reason is None else error_reason,
+        judgeable=bool(diagnosis["judgeable"]),
+        fade_result=str(diagnosis["fade_result"]),
+        color_result=str(diagnosis["color_result"]),
+        reddening_result=str(diagnosis["reddening_result"]),
+        fade_rate_mag_per_day=diagnosis["fade_rate_mag_per_day"],
+        g_minus_r=diagnosis["g_minus_r"],
+        reddening_rise_mag=diagnosis["reddening_rise_mag"],
+        is_candidate_5day=caught_later,
+        peak_mag_g=peaks["g"],
+        peak_mag_r=peaks["r"],
+        peak_mag_i=peaks["i"],
     )
     write_recall_tables(destination / "at2017gfo", pd.DataFrame([row]), frame)
-    return text, candidate
+    return text, bool(diagnosis["is_candidate"])
 
 
 def _seeds_for(which: str, seed: int | None) -> list[tuple[str, int]]:
@@ -1190,44 +1768,15 @@ def _distance_bins(scored: pd.DataFrame) -> list[DistanceBin]:
     return bins
 
 
-def _event_row(
-    event: FakeEvent,
-    *,
-    never_detected: bool,
-    is_candidate: bool,
-    n_visible: int,
-    model_failed: bool,
-) -> dict[str, object]:
-    """One fake as a flat row, including the score columns."""
+def _event_row(event: FakeEvent, **scores: object) -> dict[str, object]:
+    """One fake as a flat row, plus the score columns in ``scores``."""
     row: dict[str, object] = {
         field.name: getattr(event, field.name) for field in fields(event)
     }
-    row["never_detected"] = never_detected
-    row["is_candidate"] = is_candidate
-    row["n_detections_within_3_days"] = n_visible
-    row["model_failed"] = model_failed
+    row.update(scores)
     return row
 
 
 def _empty_curve() -> pd.DataFrame:
     """A detection table with the right columns and no rows."""
     return pd.DataFrame(columns=["time_days", "filter", "magnitude", "magnitude_error"])
-
-
-def _format_verdict(verdict) -> str:
-    """The same PASS / FAIL / SKIPPED lines ``kilohunt check`` prints."""
-    overall = "CANDIDATE" if verdict.is_candidate else "NOT A CANDIDATE"
-    lines = [overall]
-    for field in fields(verdict):
-        value = getattr(verdict, field.name)
-        if not isinstance(value, RuleResult):
-            continue
-        label = field.name.replace("_", " ").capitalize()
-        if value.passed is None:
-            status = "SKIPPED"
-        elif value.passed:
-            status = "PASS"
-        else:
-            status = "FAIL"
-        lines.append(f"{label}: {status}. {value.explanation}")
-    return "\n".join(lines)

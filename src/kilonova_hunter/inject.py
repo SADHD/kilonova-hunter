@@ -190,7 +190,8 @@ def inject_fake_kilonovae(
         Light curves for the fake events, in the same columns as a real fetch.
 
     Raises:
-        NotImplementedError: Until Sprint 4 installs redback.
+        NotImplementedError: Real Rubin timestamps are not wired up yet.
+            ``kilohunt recall`` already builds fakes with redback.
     """
     raise NotImplementedError(
         "kilohunt recall builds fake kilonovae on a simple survey cadence. "

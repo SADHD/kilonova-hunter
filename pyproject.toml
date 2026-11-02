@@ -24,7 +24,9 @@ kilohunt = "kilonova_hunter.cli:main"
 # Install with: uv sync --extra sim
 # Left out of the default install so tests and CI stay light.
 sim = [
-    "redback",
+    # 1.20.0 is the version the recall numbers in the pull request were
+    # computed with. Older releases are not checked.
+    "redback>=1.20.0",
 ]
 
 [dependency-groups]
