@@ -166,7 +166,12 @@ uv run kilohunt recall --set-size 20 --which test
 `test`, or `both` (the default). The printed recall is always the test
 set when that set was built. `--seed` starts the random draw. With
 `both`, the test set uses that seed plus 10000, so the two lists are
-not the same events.
+not the same events. `--cadence wfd` (the default) visits a field every
+2 to 4 nights and takes two filters about 30 minutes apart.
+`--cadence simple` gives each band its own clock. "Within 3 days" is
+3 days after the merger, not after the first detection. The depth in
+each band is the single-visit 5-sigma value from Ivezić et al. 2019,
+Table 2.
 
 The tables land in `data/recall/`, which git ignores. Tune on the
 tuning set only. The test set is the score.
