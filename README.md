@@ -173,6 +173,12 @@ not the same events. `--cadence wfd` (the default) visits a field every
 each band is the single-visit 5-sigma value from Ivezić et al. 2019,
 Table 2.
 
+The light-curve model is a sphere. Each fake still gets a random
+viewing angle, and that angle is saved in the table, but it does not
+change the brightness. The v1 validation plan asked for the angle to
+matter. This model cannot do that. A later model can read the saved
+angle.
+
 The tables land in `data/recall/`, which git ignores. Tune on the
 tuning set only. The test set is the score.
 

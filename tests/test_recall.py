@@ -22,6 +22,7 @@ from kilonova_hunter.recall import (
     comoving_volume_mpc3,
     diagnose_catch_window,
     dust_dimming_mag,
+    ejecta_masses_and_speeds,
     light_curve_for_the_filter,
     magnitude_uncertainty,
     observe_visits,
@@ -421,6 +422,10 @@ def test_one_model_error_is_not_counted_as_never_detected() -> None:
     assert "fade_rate_mag_per_day" in events.columns
     assert "g_minus_r" in events.columns
     assert "reddening_rise_mag" in events.columns
+    assert "mej_dynamical_msun" in events.columns
+    assert "mej_disk_wind_msun" in events.columns
+    assert "vej_dynamical_c" in events.columns
+    assert "vej_disk_wind_c" in events.columns
 
 
 def test_judgeable_needs_two_epochs_and_one_color() -> None:
@@ -487,8 +492,62 @@ def test_redback_sanity_fake_returns_finite_magnitudes() -> None:
         magnitudes = redback_magnitudes(times, bands, event)
         assert magnitudes.shape == (3,)
         assert np.isfinite(magnitudes).all()
+
+        # No dust. The brightest r point of this analytic model sits near
+        # 18.1. Observed peak r is about 17.2 to 17.5, so the model is
+        # faint by under a magnitude. A distance-unit mistake would move
+        # it by several magnitudes, which this range would catch.
+        no_dust = replace(event, ebv=0.0)
+        grid = np.linspace(0.4, 2.0, 17)
+        peak_r = float(
+            np.min(redback_magnitudes(grid, np.array(["r"] * len(grid)), no_dust))
+        )
+        assert 17.6 < peak_r < 18.6
+
+        from redback.ejecta_relations import TwoComponentBNS
+
+        sample = replace(event, kind="population", mass_1=1.4, mass_2=1.36)
+        ours = ejecta_masses_and_speeds(sample)
+        theirs = TwoComponentBNS(
+            sample.mass_1,
+            sample.mass_2,
+            sample.lambda_1,
+            sample.lambda_2,
+            sample.mtov,
+            sample.zeta,
+        )
+        assert ours["mej_dynamical_msun"] == pytest.approx(float(theirs.dynamical_mej))
+        assert ours["mej_disk_wind_msun"] == pytest.approx(float(theirs.disk_wind_mej))
+        assert ours["vej_dynamical_c"] == pytest.approx(float(theirs.ejecta_velocity))
     finally:
         matplotlib.rcParams.update(saved)
+
+
+def test_bns_ejecta_is_well_below_the_at2017gfo_fit() -> None:
+    """The Coughlin relation does not produce AT2017gfo's ejecta mass.
+
+    Villar et al. 2017 fit about 0.05 solar masses of red ejecta and
+    0.023 of blue ejecta, about 0.07 in total. A 1.4 plus 1.4 solar-mass
+    merger with the fixed knobs used here is much lighter than that.
+    The AT2017gfo-like row stores the published fit, not the relation.
+    """
+    event = replace(
+        at2017gfo_like_event(),
+        kind="population",
+        mass_1=1.4,
+        mass_2=1.4,
+    )
+    ejecta = ejecta_masses_and_speeds(event)
+    total = ejecta["mej_dynamical_msun"] + ejecta["mej_disk_wind_msun"]
+    assert ejecta["mej_dynamical_msun"] > 0.0
+    assert ejecta["mej_disk_wind_msun"] > 0.0
+    assert total < 0.03
+    assert ejecta["vej_disk_wind_c"] == pytest.approx(0.1)
+    published = ejecta_masses_and_speeds(at2017gfo_like_event())
+    assert published["mej_dynamical_msun"] == pytest.approx(0.050)
+    assert published["mej_disk_wind_msun"] == pytest.approx(0.023)
+    assert published["vej_dynamical_c"] == pytest.approx(0.149)
+    assert published["vej_disk_wind_c"] == pytest.approx(0.256)
 
 
 def test_build_recall_set_columns_match_what_the_report_reads() -> None:
