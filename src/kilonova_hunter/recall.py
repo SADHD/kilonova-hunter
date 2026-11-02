@@ -24,9 +24,10 @@ function:
   ``two_component_bns_ejecta_relation``. That is the two-component
   neutron-star merger model: dynamical ejecta plus a disk wind, with
   the masses of those ejecta taken from the Coughlin et al. 2019
-  relations. It is a sphere. A random viewing angle is drawn for every
-  fake and saved in the table, but the sphere does not get brighter or
-  fainter with angle.
+  relations. The model is a sphere. A random viewing angle is drawn
+  for every fake and saved in the table, but it does not change the
+  light curve. That differs from the v1 validation plan, which asked
+  for the angle to matter. The angle is kept so a later model can use it.
 - Neutron-star masses are drawn uniformly between 1.1 and 1.6 solar
   masses. The heavier star is called mass 1.
 - Distances are uniform in comoving volume, from 10 Mpc out to 300 Mpc.
@@ -848,7 +849,25 @@ def redback_magnitudes(
     Dust is added here, after redback, with the same coefficients the
     stub uses, so the tests and the real run dim the bands the same way.
 
-    The viewing angle is not passed in. The model is a sphere.
+    The viewing angle is not passed in. The model is a sphere, so the
+    angle saved on the event does not change these magnitudes. That
+    differs from the v1 validation plan.
+
+    Pipeline, checked against a units bug:
+
+    - ``output_format`` is ``magnitude``. Bands are the sncosmo Rubin
+      names (``lsstg``, ``lsstr``, ``lssti``). sncosmo returns AB
+      magnitudes.
+    - We pass a redshift, not a distance. redback turns that redshift
+      into a luminosity distance in centimeters with Planck18. We do
+      not convert units ourselves.
+    - redback applies time dilation once, inside the model, by
+      dividing the observer-frame time by ``1 + z``. We do not do it
+      again. At the AT2017gfo redshift that factor is about 1 percent.
+    - Milky Way dust is added once, here, after redback. The redback
+      call itself does not apply extinction.
+    - Time zero is the merger. ``times`` are observer-frame days since
+      then, which is what redback expects.
     """
     from astropy.cosmology import Planck18
     from redback.transient_models.kilonova_models import (
@@ -900,6 +919,137 @@ def redback_magnitudes(
         )
     dust = np.array([dust_dimming_mag(str(band), event.ebv) for band in bands])
     return np.asarray(raw, dtype=float) + dust
+
+
+def ejecta_masses_and_speeds(event: FakeEvent) -> dict[str, float]:
+    """Ejecta mass and speed that go into this fake's light curve.
+
+    For the AT2017gfo-like fake these are the Villar et al. 2017
+    two-component numbers (red 0.050 solar masses at 0.149c, blue 0.023
+    solar masses at 0.256c). Their sum is about 0.07 solar masses.
+
+    For a random fake they come from the Coughlin et al. 2019
+    two-component BNS relation, the same formulas as
+    ``redback.ejecta_relations.TwoComponentBNS``. The dynamical piece is
+    the redder one (opacity 10 in this run). The disk wind is the bluer
+    one (opacity 0.5). The wind speed is the fixed 0.1c on the event.
+    The relation derives the dynamical speed. Those random draws are
+    usually well below 0.02 solar masses in total, which is why the
+    population is fainter than AT2017gfo scaled to the same distance.
+    """
+    if event.kind == "at2017gfo":
+        return {
+            "mej_dynamical_msun": 0.050,
+            "vej_dynamical_c": 0.149,
+            "mej_disk_wind_msun": 0.023,
+            "vej_disk_wind_c": 0.256,
+        }
+    return _coughlin_two_component_ejecta(event)
+
+
+def _coughlin_two_component_ejecta(event: FakeEvent) -> dict[str, float]:
+    """Dynamical and disk-wind ejecta from Coughlin et al. 2019.
+
+    The algebra is the same as redback's ``TwoComponentBNS``. Compactness
+    comes from the tidal deformability the way that class does.
+    """
+    compactness_1 = _compactness_from_lambda(event.lambda_1)
+    compactness_2 = _compactness_from_lambda(event.lambda_2)
+    dynamical = _dynamical_ejecta_mass(
+        event.mass_1, event.mass_2, compactness_1, compactness_2
+    )
+    wind = _disk_wind_ejecta_mass(
+        event.mass_1,
+        event.mass_2,
+        event.lambda_1,
+        event.lambda_2,
+        event.mtov,
+        event.zeta,
+    )
+    speed = _dynamical_ejecta_speed(
+        event.mass_1, event.mass_2, compactness_1, compactness_2
+    )
+    return {
+        "mej_dynamical_msun": float(dynamical),
+        "vej_dynamical_c": float(speed),
+        "mej_disk_wind_msun": float(wind),
+        "vej_disk_wind_c": float(event.vej_wind),
+    }
+
+
+def _compactness_from_lambda(tidal_deformability: float) -> float:
+    """Neutron-star compactness from the dimensionless tidal deformability.
+
+    Same fit as ``redback.ejecta_relations.calc_compactness_from_lambda``.
+    """
+    log_lambda = np.log(tidal_deformability)
+    return float(0.371 - 0.0391 * log_lambda + 0.001056 * log_lambda**2)
+
+
+def _dynamical_ejecta_mass(
+    mass_1: float,
+    mass_2: float,
+    compactness_1: float,
+    compactness_2: float,
+) -> float:
+    """Dynamical ejecta mass in solar masses. Coughlin et al. 2019."""
+    log10_mej = (
+        -0.0719
+        * (
+            mass_1 * (1.0 - 2.0 * compactness_1) / compactness_1
+            + mass_2 * (1.0 - 2.0 * compactness_2) / compactness_2
+        )
+        + 0.2116
+        * (mass_1 * (mass_2 / mass_1) ** -2.905 + mass_2 * (mass_1 / mass_2) ** -2.905)
+        - 2.42
+    )
+    return float(10.0**log10_mej)
+
+
+def _dynamical_ejecta_speed(
+    mass_1: float,
+    mass_2: float,
+    compactness_1: float,
+    compactness_2: float,
+) -> float:
+    """Dynamical ejecta speed in units of c. Coughlin et al. 2019."""
+    return float(
+        -0.3090 * (mass_1 / mass_2) * (1.0 + -1.879 * compactness_1)
+        + -0.3090 * (mass_2 / mass_1) * (1.0 + -1.879 * compactness_2)
+        + 0.657
+    )
+
+
+def _disk_wind_ejecta_mass(
+    mass_1: float,
+    mass_2: float,
+    lambda_1: float,
+    lambda_2: float,
+    mtov: float,
+    zeta: float,
+) -> float:
+    """Disk-wind ejecta mass in solar masses. Coughlin et al. 2019.
+
+    ``zeta`` is the fraction of the disk that becomes unbound.
+    """
+    mass_ratio = mass_1 / mass_2
+    lambda_tilde = (
+        (16.0 / 13.0)
+        * (
+            lambda_2
+            + lambda_1 * mass_ratio**5
+            + 12.0 * lambda_1 * mass_ratio**4
+            + 12.0 * lambda_2 * mass_ratio
+        )
+        / (mass_ratio + 1.0) ** 5
+    )
+    chirp = (mass_1 * mass_2) ** 0.6 * (mass_1 + mass_2) ** -0.2
+    radius_16 = chirp * (lambda_tilde / 0.0042) ** (1.0 / 6.0)
+    threshold = (2.38 - 3.606 * mtov / radius_16) * mtov
+    log10_disk = -31.335 * (
+        1.0 + -0.9760 * np.tanh((1.0474 - (mass_1 + mass_2) / threshold) / 0.05957)
+    )
+    return float(zeta * 10.0**log10_disk)
 
 
 def draw_population(
@@ -1773,6 +1923,9 @@ def _event_row(event: FakeEvent, **scores: object) -> dict[str, object]:
     row: dict[str, object] = {
         field.name: getattr(event, field.name) for field in fields(event)
     }
+    # Ejecta first, then the score, so a score column cannot be overwritten
+    # by a mass. The masses are what the light curve was built from.
+    row.update(ejecta_masses_and_speeds(event))
     row.update(scores)
     return row
 
