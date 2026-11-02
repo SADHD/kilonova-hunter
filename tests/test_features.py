@@ -203,11 +203,12 @@ def test_color_over_time_stays_inside_the_data() -> None:
 
 
 def test_color_rise_stops_at_the_end_of_the_window() -> None:
-    """The rise uses the last color inside the window, not a later one.
+    """The fit uses colors inside the window, not a later one.
 
     g minus r is 0.0 at day 0, 0.5 at day 2, and 1.0 at day 4. The
-    default window is 2 days, so day 4 is left out and the rise is 0.5.
-    A shorter window, read from the config, leaves only the first color
+    default window is 2 days, so day 4 is left out. With two colors the
+    straight line goes through both, and the rise is still 0.5. A
+    shorter window, read from the config, leaves only the first color
     and the rise cannot be measured.
     """
     curve = _curve(
@@ -253,6 +254,84 @@ def test_one_color_measurement_has_no_rise() -> None:
     assert change.rise is None
     assert change.color_count == 1
     assert "only once" in change.explanation.lower()
+
+
+def test_one_noisy_first_color_does_not_flip_a_reddening_curve() -> None:
+    """One bad first point no longer decides whether the object got redder.
+
+    The true color climbs by 0.25 mag every half day, from 0.00 at day 0
+    to 1.00 at day 2. The day-0 measurement is wrong: it says 1.20, which
+    is redder than the end of the curve, and its g-band uncertainty is
+    0.50 mag. Every later point has an uncertainty of 0.02 mag in each
+    band.
+
+    The old check subtracted the raw first color from the raw last color.
+    That difference is 1.00 - 1.20 = -0.20, so a clearly reddening curve
+    looked like it got bluer. The weighted line trusts the precise points
+    (the weight is one over the uncertainty) and the rise stays near the
+    true 1.00 mag, which is more than the placeholder cut of 0.10.
+    """
+    times = (0.0, 0.5, 1.0, 1.5, 2.0)
+    # The first color is the bad one. The rest sit on a line of slope 0.5.
+    colors = (1.2, 0.25, 0.50, 0.75, 1.00)
+    g_errors = (0.50, 0.02, 0.02, 0.02, 0.02)
+    rows: list[dict[str, float | str]] = []
+    for time_days, color, g_error in zip(times, colors, g_errors, strict=True):
+        rows.append(
+            {
+                "time_days": time_days,
+                "filter": "r",
+                "magnitude": 20.0,
+                "magnitude_error": 0.02,
+            }
+        )
+        rows.append(
+            {
+                "time_days": time_days,
+                "filter": "g",
+                "magnitude": 20.0 + color,
+                "magnitude_error": g_error,
+            }
+        )
+    curve = pd.DataFrame(rows)
+
+    samples = g_minus_r_over_time(curve)
+    assert samples[0].g_minus_r == pytest.approx(1.2)
+    assert samples[-1].g_minus_r == pytest.approx(1.0)
+    # The raw two-point rise the old code reported. Negative means bluer.
+    raw_endpoint_rise = samples[-1].g_minus_r - samples[0].g_minus_r
+    assert raw_endpoint_rise == pytest.approx(-0.2)
+    # g and r are separate measurements, so their errors combine in
+    # quadrature: the square root of the sum of the squares.
+    assert samples[0].uncertainty == pytest.approx(float(np.hypot(0.50, 0.02)))
+
+    change = g_minus_r_rise(curve)
+    assert change.rise is not None
+    assert change.rise == pytest.approx(0.99, abs=0.02)
+    assert change.rise > THRESHOLDS.min_g_minus_r_rise
+    assert "one over its uncertainty" in change.explanation
+
+
+def test_color_uncertainty_between_points_mixes_the_neighbors() -> None:
+    """A color read between visits inherits the neighbors' uncertainties.
+
+    g is measured at day 0 and day 2, each with an error of 0.10. Halfway
+    between them the magnitude is an equal mix of the two, so each error
+    is halved before they are combined. r is measured at that halfway
+    time with an error of 0.20, and the color error combines g and r.
+    """
+    curve = pd.DataFrame(
+        {
+            "time_days": [0.0, 2.0, 1.0],
+            "filter": ["g", "g", "r"],
+            "magnitude": [20.0, 22.0, 19.0],
+            "magnitude_error": [0.10, 0.10, 0.20],
+        }
+    )
+    samples = g_minus_r_over_time(curve)
+    assert [sample.time_days for sample in samples] == pytest.approx([1.0])
+    g_error = float(np.hypot(0.5 * 0.10, 0.5 * 0.10))
+    assert samples[0].uncertainty == pytest.approx(float(np.hypot(g_error, 0.20)))
 
 
 def test_nan_magnitude_is_skipped_instead_of_breaking_the_fit() -> None:
