@@ -134,7 +134,7 @@ On the noise-free demo, which does have two colors, the printout is:
 CANDIDATE
 Fade: PASS. It faded 0.90 mag/day in g, which is faster than 0.30 mag/day, so the fade rule passes.
 Color: PASS. 1 day after the r-band peak, g minus r is 0.35, which is redder than 0.00, so the color rule passes.
-Reddening: PASS. From day 0.00 to day 2.00, g minus r went from -0.40 to 0.35, a rise of 0.75 mag, which is more than 0.10 mag, so the reddening rule passes.
+Reddening: PASS. From day 0.00 to day 2.00, a straight-line fit of g minus r goes from -0.43 to 0.32, a rise of 0.75 mag, which is more than 0.10 mag, so the reddening rule passes.
 ```
 
 A file that loads exits with code 0 even when the answer is not a

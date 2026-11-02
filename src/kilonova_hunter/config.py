@@ -30,10 +30,12 @@ class Thresholds:
         redder_than_g_minus_r: The color rule passes when g minus r is
             strictly above this after the peak. A larger g minus r is
             redder, because g has become the fainter band.
-        min_g_minus_r_rise: The reddening rule passes when g minus r
-            climbs by strictly more than this, in magnitudes, between
-            the earliest color and a later color. A positive number
-            means "it has to get redder", not merely "it is red".
+        min_g_minus_r_rise: The reddening rule passes when the fitted
+            g minus r climb is strictly above this, in magnitudes. The
+            climb is the slope of a straight line through the colors in
+            the window, times the time from the first of those colors
+            to the last. A positive number means "it has to get redder",
+            not merely "it is red".
         min_points_per_band: How many points a band needs after its
             peak before a straight line is worth fitting. Two is the
             minimum, because a line is defined by two different times.
@@ -42,11 +44,12 @@ class Thresholds:
         color_days_after_peak: How long after the r-band peak we read
             g minus r. Zero would read the color at the peak itself.
         reddening_window_days: How many days after the earliest color
-            we still look for a later color. The later color has to
-            fall inside this window.
-        min_color_separation_days: The smallest gap, in days, between
-            the two colors the reddening rule compares. Two snapshots
-            of the same visit are not a change.
+            are still included in the straight-line fit. A color past
+            this window is left out.
+        min_color_separation_days: The smallest time span, in days, the
+            fitted line has to cover. Two snapshots of the same visit
+            are not a change, and the rule is skipped when the colors
+            in the window are closer together than this.
         fade_bands: The filters the fade rule is allowed to use. The
             rule passes when any one of these fades fast enough.
     """
@@ -91,7 +94,7 @@ class Thresholds:
         if self.min_color_separation_days > self.reddening_window_days:
             raise ValueError(
                 "min_color_separation_days cannot be longer than "
-                "reddening_window_days, because the later color has to sit "
+                "reddening_window_days, because the fitted line has to sit "
                 "inside the window "
                 f"({self.min_color_separation_days} days is longer than "
                 f"{self.reddening_window_days} days)."
@@ -117,14 +120,14 @@ class Thresholds:
 # on Tuesday Nov 3, 2026, after checking AT2017gfo. They are here so the
 # tests have numbers to read. They are not a science result.
 #
-# min_g_minus_r_rise is how many magnitudes g minus r must climb.
-# 0.1 only means "a little redder than it started".
-# reddening_window_days is how many days after the first color we still
-# look for a later color. 2 days follows the demo's "turns red within
-# about two days" shape, not a measured window.
-# min_color_separation_days is the smallest gap between those two
-# colors. 0.5 days matches the demo's half-day spacing, so two
-# neighboring visits can be compared and two copies of one visit cannot.
+# min_g_minus_r_rise is how many magnitudes the fitted g minus r line
+# must climb. 0.1 only means "a little redder than it started".
+# reddening_window_days is how many days of colors go into that line.
+# 2 days follows the demo's "turns red within about two days" shape,
+# not a measured window.
+# min_color_separation_days is the shortest span that line may cover.
+# 0.5 days matches the demo's half-day spacing, so two neighboring
+# visits can be fit and two copies of one visit cannot.
 #
 # The remaining fields are helper settings, not science cuts. Two
 # points is the smallest line. Three days is the "first few days" the

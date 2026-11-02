@@ -307,6 +307,10 @@ def test_stays_equally_red_fails_reddening() -> None:
     Two or more color measurements exist, the fade is fast, and the
     single-time color cut passes. The reddening rule is the one that
     fails, and that failure rejects the object.
+
+    The sentence quotes the fitted line, not a raw pair of points. A
+    flat line is a rise of 0.00 either way, so this wording change does
+    not change the verdict.
     """
     curve = _fading_curve(fade_per_day=0.8, g_minus_r=0.4)
     verdict = is_kilonova_candidate(curve)
@@ -314,9 +318,9 @@ def test_stays_equally_red_fails_reddening() -> None:
     assert verdict.color.passed is True
     assert verdict.reddening.passed is False
     assert verdict.reddening.explanation == (
-        "From day 0.00 to day 2.00, g minus r went from 0.40 to 0.40, "
-        "a rise of 0.00 mag, which is not more than 0.10 mag, "
-        "so the reddening rule fails."
+        "From day 0.00 to day 2.00, a straight-line fit of g minus r "
+        "goes from 0.40 to 0.40, a rise of 0.00 mag, which is not more "
+        "than 0.10 mag, so the reddening rule fails."
     )
     assert verdict.is_candidate is False
 
@@ -324,16 +328,20 @@ def test_stays_equally_red_fails_reddening() -> None:
 def test_noise_free_demo_passes_reddening() -> None:
     """The made-up kilonova gets redder across the placeholder window.
 
-    g fades faster than r, so g minus r climbs. From the first visit to
-    the visit two days later, the rise is larger than the placeholder
-    cut of 0.1 mag.
+    g fades faster than r, so g minus r climbs. The noise is off, so
+    every color has an uncertainty of zero and the fit weights them
+    equally. The color is not one straight line: it steepens after the
+    peak, so the fitted colors at the two ends (-0.43 and 0.32) are not
+    the raw measurements (-0.40 and 0.35). The climb of the line across
+    those two days is still 0.75 mag, which is more than the placeholder
+    cut of 0.10.
     """
     result = evaluate_reddening_rule(_noise_free_demo())
     assert result.passed is True
     assert result.explanation == (
-        "From day 0.00 to day 2.00, g minus r went from -0.40 to 0.35, "
-        "a rise of 0.75 mag, which is more than 0.10 mag, "
-        "so the reddening rule passes."
+        "From day 0.00 to day 2.00, a straight-line fit of g minus r "
+        "goes from -0.43 to 0.32, a rise of 0.75 mag, which is more than "
+        "0.10 mag, so the reddening rule passes."
     )
 
 
