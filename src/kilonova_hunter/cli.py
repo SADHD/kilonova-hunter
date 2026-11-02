@@ -20,6 +20,7 @@ import pandas as pd
 
 from kilonova_hunter.filter import CandidateVerdict, RuleResult, is_kilonova_candidate
 from kilonova_hunter.inject import simulate_kilonova_light_curve
+from kilonova_hunter.recall import redback_available, run_recall
 from kilonova_hunter.report import plot_light_curve
 
 # Default place for a plot you make while exploring. The folder is
@@ -45,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and explain each verdict. "
             "The demo command plots a made-up kilonova and needs no alert download. "
             "The check command runs the v1 rules on one light curve CSV. "
+            "The recall command scores fake kilonovae and needs the optional "
+            "redback library (uv sync --extra sim). "
             "Searching a real week of alerts (kilohunt --week) arrives in Sprint 3."
         ),
     )
@@ -106,6 +109,43 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=("CSV with columns time_days, filter, magnitude, and magnitude_error."),
     )
+
+    recall = subparsers.add_parser(
+        "recall",
+        help="Score fake kilonovae and print how many the filter catches.",
+        description=(
+            "Build fake neutron-star mergers, sample them with a simple "
+            "Rubin-like cadence, and count how many the v1 rules catch "
+            "within 3 days of the merger. "
+            "The official number is the test set. A tuning set is written "
+            "beside it so cuts can be tried without using the test set. "
+            "The cuts stay the placeholders in config.py. "
+            "This needs redback, which is optional: uv sync --extra sim. "
+            "The tables go under data/recall/, which git ignores."
+        ),
+    )
+    recall.add_argument(
+        "--set-size",
+        type=int,
+        default=200,
+        help="How many fakes in each set. Default: 200.",
+    )
+    recall.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Random seed. With --which both, the tuning set uses this seed "
+            "and the test set uses this seed plus 10000, so the two lists "
+            "are different draws. Default: 1100 for tuning and 11100 for test."
+        ),
+    )
+    recall.add_argument(
+        "--which",
+        choices=("tuning", "test", "both"),
+        default="both",
+        help="Which set to build. Default: both. The printed recall is the test set.",
+    )
     return parser
 
 
@@ -126,6 +166,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "check":
         _run_check(args.light_curve)
+        return
+    if args.command == "recall":
+        _run_recall(args.set_size, args.seed, args.which)
         return
     # Running `kilohunt` with no command should explain itself, the way
     # `--help` does, rather than failing on a missing subcommand.
@@ -155,6 +198,24 @@ def _run_demo(output: Path, seed: int, save_csv: Path | None) -> None:
 
     print("Filter verdict for the noise-free curve:")
     print(_format_verdict(is_kilonova_candidate(noise_free)))
+
+
+def _run_recall(set_size: int, seed: int | None, which: str) -> None:
+    """Score fake kilonovae, or explain that redback is not installed.
+
+    The science lives in ``recall.py``. This function only checks that
+    the optional library is present and prints the report.
+    """
+    if not redback_available():
+        _fail(
+            "kilohunt recall needs the redback library. It is optional so "
+            "the normal install and the tests stay small. Install it with:\n"
+            "    uv sync --extra sim\n"
+            "Then run kilohunt recall again."
+        )
+    if set_size < 1:
+        _fail(f"--set-size must be at least 1, got {set_size}.")
+    print(run_recall(which=which, set_size=set_size, seed=seed))
 
 
 def _run_check(path: Path) -> None:
