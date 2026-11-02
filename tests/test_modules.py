@@ -17,6 +17,7 @@ PIPELINE_MODULES = [
     "kilonova_hunter.features",
     "kilonova_hunter.filter",
     "kilonova_hunter.inject",
+    "kilonova_hunter.recall",
     "kilonova_hunter.tns",
     "kilonova_hunter.report",
     "kilonova_hunter.cli",

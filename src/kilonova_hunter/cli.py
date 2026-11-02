@@ -11,15 +11,15 @@ CSV of one light curve and prints the verdict.
 
 import argparse
 import sys
-from collections.abc import Iterator
-from dataclasses import fields
 from pathlib import Path
 from typing import NoReturn
 
 import pandas as pd
 
-from kilonova_hunter.filter import CandidateVerdict, RuleResult, is_kilonova_candidate
+from kilonova_hunter.filter import format_verdict as _format_verdict
+from kilonova_hunter.filter import is_kilonova_candidate
 from kilonova_hunter.inject import simulate_kilonova_light_curve
+from kilonova_hunter.recall import redback_available, run_recall
 from kilonova_hunter.report import plot_light_curve
 
 # Default place for a plot you make while exploring. The folder is
@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and explain each verdict. "
             "The demo command plots a made-up kilonova and needs no alert download. "
             "The check command runs the v1 rules on one light curve CSV. "
+            "The recall command scores fake kilonovae and needs the optional "
+            "redback library (uv sync --extra sim). "
             "Searching a real week of alerts (kilohunt --week) arrives in Sprint 3."
         ),
     )
@@ -106,6 +108,55 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=("CSV with columns time_days, filter, magnitude, and magnitude_error."),
     )
+
+    recall = subparsers.add_parser(
+        "recall",
+        help="Score fake kilonovae and print how many the filter catches.",
+        description=(
+            "Build fake neutron-star mergers, sample them with a "
+            "Rubin wide-fast-deep cadence (or --cadence simple), and count "
+            "how many the v1 rules catch within 3 days of the merger. "
+            "Those 3 days start at the merger, not at the first detection. "
+            "The official number is the test set. A tuning set is written "
+            "beside it so cuts can be tried without using the test set. "
+            "The cuts stay the placeholders in config.py. "
+            "This needs redback, which is optional: uv sync --extra sim. "
+            "The tables go under data/recall/, which git ignores."
+        ),
+    )
+    recall.add_argument(
+        "--set-size",
+        type=int,
+        default=200,
+        help="How many fakes in each set. Default: 200.",
+    )
+    recall.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Random seed. With --which both, the tuning set uses this seed "
+            "and the test set uses this seed plus 10000, so the two lists "
+            "are different draws. Default: 1100 for tuning and 11100 for test."
+        ),
+    )
+    recall.add_argument(
+        "--which",
+        choices=("tuning", "test", "both"),
+        default="both",
+        help="Which set to build. Default: both. The printed recall is the test set.",
+    )
+    recall.add_argument(
+        "--cadence",
+        choices=("wfd", "simple"),
+        default="wfd",
+        help=(
+            "How the fake survey visits. wfd (the default) is a wide-fast-deep "
+            "style: a field every 2 to 4 nights, two filters about 30 minutes "
+            "apart. simple gives each of g, r, and i its own clock, at least "
+            "one day between visits of that band."
+        ),
+    )
     return parser
 
 
@@ -126,6 +177,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "check":
         _run_check(args.light_curve)
+        return
+    if args.command == "recall":
+        _run_recall(args.set_size, args.seed, args.which, args.cadence)
         return
     # Running `kilohunt` with no command should explain itself, the way
     # `--help` does, rather than failing on a missing subcommand.
@@ -157,6 +211,24 @@ def _run_demo(output: Path, seed: int, save_csv: Path | None) -> None:
     print(_format_verdict(is_kilonova_candidate(noise_free)))
 
 
+def _run_recall(set_size: int, seed: int | None, which: str, cadence: str) -> None:
+    """Score fake kilonovae, or explain that redback is not installed.
+
+    The science lives in ``recall.py``. This function only checks that
+    the optional library is present and prints the report.
+    """
+    if not redback_available():
+        _fail(
+            "kilohunt recall needs the redback library. It is optional so "
+            "the normal install and the tests stay small. Install it with:\n"
+            "    uv sync --extra sim\n"
+            "Then run kilohunt recall again."
+        )
+    if set_size < 1:
+        _fail(f"--set-size must be at least 1, got {set_size}.")
+    print(run_recall(which=which, set_size=set_size, seed=seed, cadence=cadence))
+
+
 def _run_check(path: Path) -> None:
     """Read one light curve CSV and print the filter verdict.
 
@@ -167,60 +239,6 @@ def _run_check(path: Path) -> None:
     """
     light_curve = _read_light_curve_csv(path)
     print(_format_verdict(is_kilonova_candidate(light_curve)))
-
-
-def _format_verdict(verdict: CandidateVerdict) -> str:
-    """Turn a filter verdict into a few lines of text.
-
-    The first line is the overall answer, ``CANDIDATE`` or
-    ``NOT A CANDIDATE``. That word comes from ``verdict.is_candidate``.
-    This function does not decide the science again.
-
-    Each line after that is one rule: its name, then PASS, FAIL, or
-    SKIPPED, then the sentence. The rules are whatever the verdict
-    contains. Fade and color are not named here, so a new rule added
-    on the verdict (reddening, for example) is printed too.
-    """
-    overall = "CANDIDATE" if verdict.is_candidate else "NOT A CANDIDATE"
-    lines = [overall]
-    for name, result in _iter_rule_results(verdict):
-        # "fade" is easier to read as "Fade". Underscores become spaces
-        # so a name like "color_rate" would read "Color rate".
-        label = name.replace("_", " ").capitalize()
-        lines.append(f"{label}: {_rule_status(result)}. {result.explanation}")
-    return "\n".join(lines)
-
-
-def _iter_rule_results(
-    verdict: CandidateVerdict,
-) -> Iterator[tuple[str, RuleResult]]:
-    """Yield ``(field_name, rule_result)`` for every rule on a verdict.
-
-    A rule is a field whose value is a ``RuleResult``. ``is_candidate``
-    is a bool, so this loop leaves it out. The field name is the rule's
-    name. Walking the fields, instead of writing "fade" and "color"
-    here, means a third rule shows up on its own.
-    """
-    for field in fields(verdict):
-        value = getattr(verdict, field.name)
-        if isinstance(value, RuleResult):
-            yield field.name, value
-
-
-def _rule_status(result: RuleResult) -> str:
-    """Return PASS, FAIL, or SKIPPED for one rule result.
-
-    SKIPPED means ``passed`` is ``None``: the rule was not applied.
-    Reddening does that when there are not two colors to compare. A
-    skip is not a failure, and it does not turn the overall line into
-    ``NOT A CANDIDATE``. Fade and color always pass or fail. Too little
-    data for those two is FAIL.
-    """
-    if result.passed is None:
-        return "SKIPPED"
-    if result.passed:
-        return "PASS"
-    return "FAIL"
 
 
 def _read_light_curve_csv(path: Path) -> pd.DataFrame:

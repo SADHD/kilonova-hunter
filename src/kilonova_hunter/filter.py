@@ -32,7 +32,7 @@ noise-free toy curve. Scoring a whole downloaded night is not wired
 up yet.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import pandas as pd
 
@@ -383,6 +383,39 @@ def _or_list(names: tuple[str, ...]) -> str:
     if len(items) == 2:
         return f"{items[0]} or {items[1]}"
     return ", ".join(items[:-1]) + f", or {items[-1]}"
+
+
+def format_verdict(verdict: CandidateVerdict) -> str:
+    """Turn a filter verdict into the lines ``kilohunt check`` prints.
+
+    The first line is ``CANDIDATE`` or ``NOT A CANDIDATE``. Each line
+    after that is one rule: PASS, FAIL, or SKIPPED, then the sentence.
+    ``recall`` uses this same text for the AT2017gfo-like sanity check,
+    so the two commands cannot drift apart.
+    """
+    overall = "CANDIDATE" if verdict.is_candidate else "NOT A CANDIDATE"
+    lines = [overall]
+    for field in fields(verdict):
+        value = getattr(verdict, field.name)
+        if not isinstance(value, RuleResult):
+            continue
+        label = field.name.replace("_", " ").capitalize()
+        lines.append(f"{label}: {_rule_word(value)}. {value.explanation}")
+    return "\n".join(lines)
+
+
+def _rule_word(result: RuleResult) -> str:
+    """PASS, FAIL, or SKIPPED.
+
+    SKIPPED means ``passed`` is ``None``. Reddening does that when there
+    are not two colors to compare. A skip is not a failure. Fade and
+    color always pass or fail. Too little data for those two is FAIL.
+    """
+    if result.passed is None:
+        return "SKIPPED"
+    if result.passed:
+        return "PASS"
+    return "FAIL"
 
 
 def _after_peak_phrase(days_after_peak: float) -> str:

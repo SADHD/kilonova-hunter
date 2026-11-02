@@ -147,6 +147,41 @@ uv run kilohunt demo --save-csv output/demo_kilonova.csv
 uv run kilohunt check output/demo_kilonova.csv
 ```
 
+## Score fake kilonovae
+
+`kilohunt recall` asks a published model how a neutron-star merger would
+look, then asks the v1 rules whether they would have caught it. Recall
+is the fraction that were caught. The cuts are still the placeholders
+in `config.py`. The number is not a tuned result.
+
+The physical model is [redback](https://github.com/nikhil-sarin/redback).
+It is optional, so `uv sync` and the tests stay small:
+
+```bash
+uv sync --extra sim
+uv run kilohunt recall --set-size 20 --which test
+```
+
+`--set-size` is how many fakes (default 200). `--which` is `tuning`,
+`test`, or `both` (the default). The printed recall is always the test
+set when that set was built. `--seed` starts the random draw. With
+`both`, the test set uses that seed plus 10000, so the two lists are
+not the same events. `--cadence wfd` (the default) visits a field every
+2 to 4 nights and takes two filters about 30 minutes apart.
+`--cadence simple` gives each band its own clock. "Within 3 days" is
+3 days after the merger, not after the first detection. The depth in
+each band is the single-visit 5-sigma value from Ivezić et al. 2019,
+Table 2.
+
+The light-curve model is a sphere. Each fake still gets a random
+viewing angle, and that angle is saved in the table, but it does not
+change the brightness. The v1 validation plan asked for the angle to
+matter. This model cannot do that. A later model can read the saved
+angle.
+
+The tables land in `data/recall/`, which git ignores. Tune on the
+tuning set only. The test set is the score.
+
 ## Run the tests and the style check
 
 A test is a function that checks one fact about the code. Pytest finds the
@@ -190,9 +225,9 @@ Two checks sit beside that pipeline:
 
 | Module | Job | When |
 | --- | --- | --- |
-| `inject.py` | Fake kilonovae, so we can measure how many true ones the filter would catch | The simple curve works now. Published models arrive in Sprint 4 |
+| `inject.py` | The simple teaching curve the demo plots | Works now. `recall.py` builds the redback fakes |
 | `tns.py` | Confirmed types from the Transient Name Server, so we can see what fooled the filter | Sprint 5 |
-| `cli.py` | The `kilohunt` command | `demo`, `check`, and `--help` work now. `--week` arrives in Sprint 3 |
+| `cli.py` | The `kilohunt` command | `demo`, `check`, `recall`, and `--help`. `recall` needs `uv sync --extra sim`. `--week` arrives in Sprint 3 |
 
 A light curve is a pandas table. The demo and the plot helper share these columns:
 
@@ -229,9 +264,10 @@ the sprint that uses them:
 
 - **Fink and ALeRCE clients (Sprint 1).** They download Rubin's public alerts.
   Fink is the first choice. ALeRCE is the backup if Fink is unavailable.
-- **redback (Sprint 4).** Published kilonova models for the fake-kilonova
-  test. The recall number should come from those models, not from the
-  made-up curve in the demo.
+- **redback (optional).** Published kilonova models for `kilohunt recall`.
+  Install it with `uv sync --extra sim`. The recall number comes from
+  those models, not from the made-up curve in the demo. The demo and
+  the tests run without it.
 
 NumPy, pandas, Astropy, and Matplotlib are installed now. The demo uses
 NumPy, pandas, and Matplotlib. Astropy is here for sky coordinates and times

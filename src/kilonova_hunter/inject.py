@@ -1,10 +1,9 @@
 """Fake kilonovae, used to measure what the filter would catch.
 
-Sprint 4 will build these from published redback models and sample them at
-the times Rubin actually observed, so the recall number means something.
-redback is not installed yet. Until then, ``simulate_kilonova_light_curve``
-draws a simple curve with the same rough shape: a one-day rise, a week-long
-fade, and a color that turns red. Tests and the demo use that curve.
+``kilohunt recall`` (in ``recall.py``) builds the physical fakes with
+redback, which is optional (``uv sync --extra sim``). This module still
+draws the simple teaching curve the demo and the filter tests use: a
+one-day rise, a week-long fade, and a color that turns red.
 """
 
 import numpy as np
@@ -178,8 +177,9 @@ def inject_fake_kilonovae(
 ) -> pd.DataFrame:
     """Build fake kilonovae on the times and filters of real Rubin observations.
 
-    Sprint 4 uses redback for the physical model and adds realistic noise.
-    ``simulate_kilonova_light_curve`` is the stand-in you can run today.
+    The recall harness builds its own visit times and does not use this
+    function. Sampling fakes on the times of a real Rubin night is still
+    later. ``simulate_kilonova_light_curve`` is the teaching curve.
 
     Args:
         observation_times: Real visit times and filters to sample the fakes at.
@@ -190,10 +190,12 @@ def inject_fake_kilonovae(
         Light curves for the fake events, in the same columns as a real fetch.
 
     Raises:
-        NotImplementedError: Until Sprint 4 installs redback.
+        NotImplementedError: Real Rubin timestamps are not wired up yet.
+            ``kilohunt recall`` already builds fakes with redback.
     """
     raise NotImplementedError(
-        "Physical fake kilonovae arrive in Sprint 4 with redback "
+        "kilohunt recall builds fake kilonovae on a simple survey cadence. "
+        "Placing them on a real night's timestamps is not wired up yet "
         f"({count} events, seed {seed}, {len(observation_times)} real timestamps). "
-        "Use simulate_kilonova_light_curve for a made-up curve until then."
+        "Use simulate_kilonova_light_curve for the teaching curve."
     )
