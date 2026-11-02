@@ -7,7 +7,8 @@ light curve:
 - the fade rate in each band, as a straight line fitted after the
   brightest point
 - g minus r at one chosen time
-- how much g minus r rises between the earliest color and a later one
+- how much g minus r rises, from a straight line fitted to every
+  color in the time window, trusting precise points more than noisy ones
 
 A negative fade rate means the object is still getting brighter,
 because a smaller magnitude is brighter. A positive color rise means
@@ -78,10 +79,16 @@ class ColorSample:
         time_days: When this color was read.
         g_minus_r: g magnitude minus r magnitude. A larger number is
             redder.
+        uncertainty: How unsure this color is, in magnitudes. It is
+            built from the ``magnitude_error`` of the g and r points
+            that produced it. ``None`` when those errors are missing,
+            so a fit cannot give this color a weight. A larger number
+            means a noisier measurement.
     """
 
     time_days: float
     g_minus_r: float
+    uncertainty: float | None = None
 
 
 @dataclass(frozen=True)
@@ -89,20 +96,29 @@ class ColorRise:
     """How much g minus r changed between two times.
 
     Attributes:
-        rise: The later color minus the earlier color, in magnitudes.
-            ``None`` when there are not two colors inside the window.
-            A positive number means the object got redder. A negative
-            number means it got bluer.
-        earlier_time_days: When the first color was read, or ``None``
-            if no color could be read at all.
-        later_time_days: When the comparison color was read, or
-            ``None`` if there was no later color inside the window.
-        earlier_g_minus_r: g minus r at the earlier time, or ``None``.
-        later_g_minus_r: g minus r at the later time, or ``None``.
+        rise: How many magnitudes the fitted line climbs from the first
+            color time in the window to the last. This is the slope
+            times that time span, which is the same as the fitted color
+            at the last time minus the fitted color at the first time.
+            ``None`` when there are not two colors spread across the
+            window. A positive number means the object got redder. A
+            negative number means it got bluer.
+        earlier_time_days: When the first color in the fit was read, or
+            ``None`` if no color could be read at all.
+        later_time_days: When the last color in the fit was read, or
+            ``None`` if the window did not hold a second color far
+            enough after the first.
+        earlier_g_minus_r: The fitted line's color at
+            ``earlier_time_days``, or ``None``. This is the line, not
+            necessarily the raw measurement at that time. A noisy point
+            can sit off the line.
+        later_g_minus_r: The fitted line's color at ``later_time_days``,
+            or ``None``.
         color_count: How many times g minus r could be read, before
-            the window is applied. Two are required before a rise exists.
-        explanation: One sentence. On success it states the rise. On
-            failure it says there was not enough data.
+            the window is applied. Two inside the window, far enough
+            apart, are required before a rise exists.
+        explanation: One or two sentences. On success it states the
+            rise. On failure it says there was not enough data.
     """
 
     rise: float | None
@@ -229,8 +245,10 @@ def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
         light_curve: One object, with the usual light-curve columns.
 
     Returns:
-        The colors, earliest first. Empty when g or r is missing, or
-        when their times do not overlap.
+        The colors, earliest first. Each one carries an uncertainty when
+        the light curve has ``magnitude_error`` on the points that color
+        used. Empty when g or r is missing, or when their times do not
+        overlap.
 
     Raises:
         ValueError: If the table is missing a required column.
@@ -248,7 +266,13 @@ def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
         color = g_minus_r_at_time(light_curve, time_days)
         if color.g_minus_r is None:
             continue
-        samples.append(ColorSample(time_days=time_days, g_minus_r=color.g_minus_r))
+        samples.append(
+            ColorSample(
+                time_days=time_days,
+                g_minus_r=color.g_minus_r,
+                uncertainty=_color_uncertainty(g_points, r_points, time_days),
+            )
+        )
     return samples
 
 
@@ -258,27 +282,36 @@ def g_minus_r_rise(
 ) -> ColorRise:
     """Measure how much g minus r climbed inside the time window.
 
-    The earlier color is the earliest one ``g_minus_r_over_time`` can
-    read. The later color is the last one that is still inside
-    ``reddening_window_days`` of that first color, and at least
-    ``min_color_separation_days`` after it. The rise is the later color
-    minus the earlier color. Using the last color in the window asks
-    "how much redder did it get over that whole stretch?", rather than
-    "did the very next visit move?".
+    Every color ``g_minus_r_over_time`` can read inside
+    ``reddening_window_days`` of the earliest color is kept. A straight
+    line is fitted to those colors: g minus r against time. The rise is
+    the slope of that line times the time from the first color in the
+    window to the last. That is the change the line itself predicts, not
+    the raw first point minus the raw last point.
 
-    If there are not two colors that fit that window, ``rise`` is
-    ``None``. This function only measures. The filter decides whether
-    the rise is large enough, and it skips the rule when ``rise`` is
-    ``None``.
+    A raw endpoint comparison is easy for one bad measurement to flip.
+    The line has to agree with the colors in between as well. When every
+    color has an uncertainty, the fit is weighted: ``numpy.polyfit`` is
+    called with ``w = 1/sigma``, so a precise color pulls the line more
+    than a noisy one. If any color is missing an uncertainty, or every
+    uncertainty is zero (the noise-free demo), the points are weighted
+    equally. Dividing by zero is not a weight.
+
+    The line still has to cover at least ``min_color_separation_days``.
+    Two snapshots of the same visit are not a change. If there are not
+    two colors spread across that window, ``rise`` is ``None``. This
+    function only measures. The filter decides whether the rise is large
+    enough, and it skips the rule when ``rise`` is ``None``.
 
     Args:
         light_curve: One object, with the usual light-curve columns.
+            ``magnitude_error`` is used when it is present.
         thresholds: The window and the minimum separation. Omit this to
             use ``THRESHOLDS`` from ``config.py``.
 
     Returns:
-        The rise, the two times and colors that produced it, how many
-        colors could be read, and one sentence.
+        The rise, the two times, the fitted colors at those times, how
+        many colors could be read, and one or two sentences.
 
     Raises:
         ValueError: If the table is missing a required column.
@@ -312,28 +345,21 @@ def g_minus_r_rise(
             ),
         )
 
-    # TODO(before redback recall run): the rise only compares the earliest
-    # color with one later color, and it ignores magnitude_error (how
-    # uncertain each brightness is). On noisy data one bad first point
-    # can swing the result. Options for later, not for now: a fit through
-    # all the colors in the window, or an error-weighted rise that trusts
-    # a precise point more than a noisy one.
     earliest = samples[0]
-    # Walk forward from the first color. A later color that is too close
-    # is still the same moment, so it does not show a change. A color
-    # past the window is too late for this comparison. The last color we
-    # keep is the far end of the window.
+    # Colors past the window are too late for this comparison. The last
+    # color we keep is the far end of the window.
     window_end = earliest.time_days + settings.reddening_window_days
-    earliest_later = earliest.time_days + settings.min_color_separation_days
-    later: ColorSample | None = None
-    for sample in samples[1:]:
-        if sample.time_days < earliest_later - _SAME_VISIT_DAYS:
-            continue
-        if sample.time_days > window_end + _SAME_VISIT_DAYS:
-            break
-        later = sample
-
-    if later is None:
+    in_window = [
+        sample
+        for sample in samples
+        if sample.time_days <= window_end + _SAME_VISIT_DAYS
+    ]
+    span = in_window[-1].time_days - in_window[0].time_days
+    # A span shorter than the minimum separation is still one moment,
+    # even if several noisy points landed on it. A span of exactly the
+    # minimum is kept: the color has had the time we asked for.
+    too_short = span + _SAME_VISIT_DAYS < settings.min_color_separation_days
+    if len(in_window) < 2 or span <= _SAME_VISIT_DAYS or too_short:
         return ColorRise(
             rise=None,
             earlier_time_days=earliest.time_days,
@@ -349,18 +375,57 @@ def g_minus_r_rise(
             ),
         )
 
-    rise = later.g_minus_r - earliest.g_minus_r
+    times = np.array([sample.time_days for sample in in_window], dtype=float)
+    colors = np.array([sample.g_minus_r for sample in in_window], dtype=float)
+    uncertainties = [sample.uncertainty for sample in in_window]
+    fitted = _fit_color_line(times, colors, uncertainties)
+    if fitted is None:
+        return ColorRise(
+            rise=None,
+            earlier_time_days=float(times[0]),
+            later_time_days=None,
+            earlier_g_minus_r=float(colors[0]),
+            later_g_minus_r=None,
+            color_count=len(samples),
+            explanation=(
+                "Not enough data: the g minus r measurements could not be "
+                "fit with a straight line."
+            ),
+        )
+
+    slope, intercept, weighted = fitted
+    earlier_time = float(times[0])
+    later_time = float(times[-1])
+    # slope * span is the climb of the line. Writing it as the fitted
+    # color at the last time minus the fitted color at the first time
+    # is the same number, and it is what the sentence quotes.
+    fitted_early = intercept + slope * earlier_time
+    fitted_late = intercept + slope * later_time
+    rise = fitted_late - fitted_early
+    if weighted:
+        weight_sentence = "Each color was weighted by one over its uncertainty."
+    else:
+        weight_sentence = (
+            "The colors were weighted equally, because a usable "
+            "uncertainty was not available on every color."
+        )
+    early_text = _format_mag(fitted_early)
+    late_text = _format_mag(fitted_late)
+    rise_text = _format_mag(rise)
     return ColorRise(
-        rise=rise,
-        earlier_time_days=earliest.time_days,
-        later_time_days=later.time_days,
-        earlier_g_minus_r=earliest.g_minus_r,
-        later_g_minus_r=later.g_minus_r,
+        rise=float(rise),
+        earlier_time_days=earlier_time,
+        later_time_days=later_time,
+        earlier_g_minus_r=float(fitted_early),
+        later_g_minus_r=float(fitted_late),
         color_count=len(samples),
         explanation=(
-            f"From day {earliest.time_days:.2f} to day {later.time_days:.2f}, "
-            f"g minus r went from {earliest.g_minus_r:.2f} to "
-            f"{later.g_minus_r:.2f}, a rise of {rise:.2f} mag."
+            f"From day {earlier_time:.2f} to day {later_time:.2f}, a "
+            f"straight-line fit of g minus r goes from {early_text} "
+            f"to {late_text}, a rise of {rise_text} mag. "
+            f"The fit uses {len(in_window)} colors inside the "
+            f"{settings.reddening_window_days:.2f}-day window. "
+            f"{weight_sentence}"
         ),
     )
 
@@ -544,6 +609,156 @@ def _magnitude_at_time(points: pd.DataFrame, when_days: float) -> float | None:
     # 0 means "at the earlier point", 1 means "at the later point".
     fraction = (when_days - earlier_time) / gap
     return earlier_magnitude + fraction * (later_magnitude - earlier_magnitude)
+
+
+def _color_uncertainty(
+    g_points: pd.DataFrame,
+    r_points: pd.DataFrame,
+    when_days: float,
+) -> float | None:
+    """Uncertainty on g minus r at one time, or None if it cannot be built.
+
+    g minus r is a difference of two magnitudes. When the two measurements
+    are independent, the uncertainties combine in quadrature: the square
+    root of the sum of the squares. The color is then at least as
+    uncertain as either band, and a noisy band makes the color noisy too.
+    """
+    g_error = _magnitude_uncertainty_at_time(g_points, when_days)
+    r_error = _magnitude_uncertainty_at_time(r_points, when_days)
+    if g_error is None or r_error is None:
+        return None
+    return float(np.hypot(g_error, r_error))
+
+
+def _magnitude_uncertainty_at_time(
+    points: pd.DataFrame,
+    when_days: float,
+) -> float | None:
+    """Uncertainty on one band at one time, following ``_magnitude_at_time``.
+
+    ``points`` must already be the usable rows for a single band. Returns
+    ``None`` when the table has no ``magnitude_error`` column, or when the
+    points this reading depends on do not have a usable error. A returned
+    ``0.0`` means the table said that magnitude is exact.
+
+    An exact visit uses that row's error. A time between two visits uses
+    the same mix as the interpolated magnitude: if the magnitude is
+    ``(1 - f) * earlier + f * later``, the uncertainty is the matching
+    combination of the two errors, added in quadrature.
+    """
+    if "magnitude_error" not in points.columns:
+        return None
+
+    ordered = points.sort_values("time_days")
+    times = [float(value) for value in ordered["time_days"]]
+    # errors="coerce" turns a word in the error column into "missing"
+    # instead of crashing the fit. A missing error means this color
+    # cannot be weighted, and the line falls back to equal weights.
+    numeric_errors = pd.to_numeric(ordered["magnitude_error"], errors="coerce")
+    errors = [float(value) for value in numeric_errors]
+
+    for time_days, error in zip(times, errors, strict=True):
+        if abs(time_days - when_days) <= _SAME_VISIT_DAYS:
+            if not np.isfinite(error) or error < 0:
+                return None
+            return error
+
+    if when_days < times[0] or when_days > times[-1]:
+        return None
+
+    earlier_time = times[0]
+    earlier_error = errors[0]
+    later_time = times[-1]
+    later_error = errors[-1]
+    for time_days, error in zip(times, errors, strict=True):
+        if time_days > when_days:
+            later_time = time_days
+            later_error = error
+            break
+        earlier_time = time_days
+        earlier_error = error
+
+    if not _usable_error(earlier_error) or not _usable_error(later_error):
+        return None
+    gap = later_time - earlier_time
+    if gap <= _SAME_VISIT_DAYS:
+        return earlier_error
+    # 0 means "at the earlier point", 1 means "at the later point".
+    fraction = (when_days - earlier_time) / gap
+    # (1 - f) of the earlier error and f of the later error. hypot is
+    # the square root of the sum of squares, which is how independent
+    # uncertainties combine.
+    return float(np.hypot((1.0 - fraction) * earlier_error, fraction * later_error))
+
+
+def _usable_error(error: float) -> bool:
+    """True when an error can be used as a weight: finite and not negative."""
+    return bool(np.isfinite(error) and error >= 0)
+
+
+def _fit_color_line(
+    times: np.ndarray,
+    colors: np.ndarray,
+    uncertainties: list[float | None],
+) -> tuple[float, float, bool] | None:
+    """Fit ``color = slope * time + intercept``.
+
+    Returns ``(slope, intercept, weighted)``. ``weighted`` is True when
+    the fit used ``w = 1/sigma``. It is False when the points were
+    weighted equally. Returns ``None`` when the fit does not produce a
+    finite line.
+
+    ``numpy.polyfit`` treats ``w`` as a multiplier on each point, and the
+    statistical choice is ``w = 1/sigma``: a small uncertainty becomes a
+    large weight, so that point pulls the line harder. A missing
+    uncertainty, a negative one, or a set of uncertainties that are all
+    zero cannot be turned into weights. Zero is the noise-free demo,
+    which is exact on purpose. Those curves get an ordinary unweighted
+    line. A zero mixed in with real uncertainties is replaced by a tiny
+    floor, so the exact point is kept and trusted much more than a noisy
+    neighbor, without dividing by zero.
+    """
+    weights = _polyfit_weights(uncertainties)
+    try:
+        if weights is None:
+            slope, intercept = np.polyfit(times, colors, 1)
+        else:
+            slope, intercept = np.polyfit(times, colors, 1, w=weights)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    slope = float(slope)
+    intercept = float(intercept)
+    if not np.isfinite(slope) or not np.isfinite(intercept):
+        return None
+    return slope, intercept, weights is not None
+
+
+def _format_mag(value: float) -> str:
+    """Format a magnitude to two decimal places, without a negative zero.
+
+    A perfectly flat line can come back from the fit as a tiny negative
+    number, around -0.0000000000000002. Rounded to two decimals that is
+    still zero, and the sentence should say 0.00 rather than -0.00.
+    """
+    text = f"{value:.2f}"
+    if text == "-0.00":
+        return "0.00"
+    return text
+
+
+def _polyfit_weights(uncertainties: list[float | None]) -> np.ndarray | None:
+    """Return ``1/sigma`` weights, or None to ask for an unweighted fit."""
+    if any(uncertainty is None for uncertainty in uncertainties):
+        return None
+    sigmas = np.array(uncertainties, dtype=float)
+    if not np.all(np.isfinite(sigmas)) or np.any(sigmas < 0):
+        return None
+    if np.all(sigmas == 0.0):
+        return None
+    # 1e-6 mag is far smaller than any real survey error, so a point the
+    # table called exact still dominates, and 1/sigma stays finite.
+    safe = np.maximum(sigmas, 1e-6)
+    return 1.0 / safe
 
 
 def _visit_times(*bands: pd.DataFrame) -> list[float]:
