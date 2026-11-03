@@ -47,6 +47,7 @@ from kilonova_hunter.features import g_minus_r_at_time, g_minus_r_rise, peak_tim
 from kilonova_hunter.filter import evaluate_fade_rule, is_kilonova_candidate
 from kilonova_hunter.judge import JUDGE_DAYS, is_judgeable
 from kilonova_hunter.recall import light_curve_for_the_filter, wilson_interval
+from kilonova_hunter.tns import TNS_STATUS_LINE
 from kilonova_hunter.villar import EXACT_KIND
 
 # Luminosity-distance bins, in Mpc. The last edge is 300 and it is
@@ -693,6 +694,7 @@ def format_test_score(
         lines.append("PROVISIONAL. Contamination limit NOT applied.")
         lines.append("")
     lines.append("Passing on ZTF does not mean passing on Rubin.")
+    lines.append(TNS_STATUS_LINE)
     lines.append("")
     lines.append(
         "Recall among judgeable fakes describes the filter. "
@@ -749,6 +751,8 @@ def summarize_grid(
         "Recall among judgeable fakes describes the filter. "
         "The catch rate is caught divided by every fake. "
         "That is the survey-level number.",
+        "",
+        TNS_STATUS_LINE,
         "",
     ]
     if dust_mode != "sfd":

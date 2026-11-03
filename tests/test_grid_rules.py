@@ -32,6 +32,34 @@ from kilonova_hunter.villar import (
 )
 
 
+def test_reports_say_tns_is_not_yet_implemented(tmp_path) -> None:
+    """Every report says TNS is not implemented, and the lookup still raises."""
+    from kilonova_hunter.grid import format_test_score, summarize_grid
+    from kilonova_hunter.recall import format_recall_report
+    from kilonova_hunter.tns import TNS_STATUS_LINE, lookup_classifications
+
+    summary = summarize_grid(
+        [],
+        samples=[],
+        dust_mode="sfd",
+        dust_reason="",
+        copies=None,
+        contamination_applied=False,
+    )
+    score = format_test_score({}, dry_run=False, provisional=True)
+    report = format_recall_report(
+        [],
+        sanity_text="none",
+        sanity_is_candidate=False,
+        output_dir=tmp_path,
+    )
+    assert TNS_STATUS_LINE in summary
+    assert TNS_STATUS_LINE in score
+    assert TNS_STATUS_LINE in report
+    with pytest.raises(NotImplementedError):
+        lookup_classifications(["AT2017gfo"])
+
+
 def test_wilson_interval_stays_inside_zero_and_one() -> None:
     """Empty, all failures, and all successes have the usual edges."""
     empty_low, empty_high = wilson_interval(0, 0)
