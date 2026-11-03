@@ -605,6 +605,89 @@ def test_bluer_color_hook_recomputes_recall_and_is_not_the_grid() -> None:
     assert shifted["recall_judgeable"] == pytest.approx(0.0)
     assert shifted["n_caught_and_judgeable"] == 0
     assert prepared[0].color_value == pytest.approx(0.45)
+    from kilonova_hunter.grid import format_color_sensitivity, g_minus_r_gap_by_day
+
+    report = format_color_sensitivity(prepared, combo)
+    assert "+0.4 mag" in report
+    assert "+0.3 mag" in report
+    assert "instrument to LSST" in report
+    gap = dict(g_minus_r_gap_by_day())
+    assert gap[1.5] == pytest.approx(0.37)
+    assert gap[2.0] == pytest.approx(0.47)
+    assert gap[3.0] == pytest.approx(0.41)
+
+
+def test_color_pair_and_post_peak_pair_are_informational() -> None:
+    """(ii) is any g and r within 1 day. (iii) is after the r peak only."""
+    from kilonova_hunter.grid import (
+        has_g_minus_r_pair,
+        informational_tuning_counts,
+        same_band_after_r_peak,
+    )
+
+    close = pd.DataFrame(
+        {
+            "time_days": [0.0, 0.2, 1.0, 1.6],
+            "filter": ["g", "r", "r", "r"],
+            "magnitude": [18.0, 18.0, 19.0, 20.0],
+            "magnitude_error": [0.02, 0.02, 0.02, 0.02],
+        }
+    )
+    assert has_g_minus_r_pair(close) is True
+    # r peak is the brightest (18.0) at 0.2 d. The later r points are
+    # 0.6 days apart, so (iii) is true for r and not for g.
+    flags = same_band_after_r_peak(close)
+    assert flags["any"] is True
+    assert flags["r"] is True
+    assert flags["g"] is False
+    far = pd.DataFrame(
+        {
+            "time_days": [0.0, 2.5],
+            "filter": ["g", "r"],
+            "magnitude": [18.0, 18.0],
+            "magnitude_error": [0.02, 0.02],
+        }
+    )
+    assert has_g_minus_r_pair(far) is False
+    before_only = pd.DataFrame(
+        {
+            "time_days": [0.0, 0.6, 1.0],
+            "filter": ["r", "r", "g"],
+            "magnitude": [18.0, 19.0, 18.5],
+            "magnitude_error": [0.02, 0.02, 0.02],
+        }
+    )
+    # The two r points straddle the peak, so the one after the peak is alone.
+    assert same_band_after_r_peak(before_only)["any"] is False
+    events = pd.DataFrame(
+        {
+            "object_id": ["close", "far"],
+            "kind": ["2017-like", "2017-like"],
+            "redshift": [0.0, 0.0],
+        }
+    )
+    curves = pd.concat(
+        [
+            close.assign(object_id="close"),
+            far.assign(object_id="far"),
+        ],
+        ignore_index=True,
+    )
+    shares = informational_tuning_counts(
+        events, curves, population="2017-like", day=3.0
+    )
+    assert shares["g_minus_r_pair"] == pytest.approx(0.5)
+    assert shares["after_r_peak_any"] == pytest.approx(0.5)
+    assert shares["after_r_peak_r"] == pytest.approx(0.5)
+    assert shares["after_r_peak_g"] == pytest.approx(0.0)
+
+
+def test_a_caught_but_not_judgeable_count_blocks_sign_off() -> None:
+    """Rule 5 is a sign-off block, the same as a sanity FAIL."""
+    from kilonova_hunter.grid import caught_not_judgeable_blocks
+
+    assert caught_not_judgeable_blocks([{"n_caught_not_judgeable": 0}]) is False
+    assert caught_not_judgeable_blocks([{"n_caught_not_judgeable": 2}]) is True
 
 
 def test_exact_copy_loop_stops_at_the_4000_cap_untestable(
