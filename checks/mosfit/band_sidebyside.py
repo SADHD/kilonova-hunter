@@ -210,4 +210,6 @@ def write_external_check(path=None):
 if __name__ == "__main__":
     written, rows = write_external_check()
     print(written.relative_to(bootstrap.ROOT).as_posix())
-    print(rows)
+    print(
+        " ".join(f"{name} {rows[name]:.6f}" for name in ("g", "r", "i", "bolometric"))
+    )
