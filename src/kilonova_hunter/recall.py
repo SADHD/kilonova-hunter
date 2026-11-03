@@ -83,11 +83,11 @@ from kilonova_hunter.config import THRESHOLDS
 from kilonova_hunter.features import (
     fade_rates,
     g_minus_r_at_time,
-    g_minus_r_over_time,
     g_minus_r_rise,
     peak_time_days,
 )
 from kilonova_hunter.filter import format_verdict, is_kilonova_candidate
+from kilonova_hunter.judge import is_judgeable
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +354,14 @@ class FakeEvent:
     kappa_wind: float
     tf_dynamical: float
     tf_wind: float
+    # Sky position and merger time. The older draw leaves these at the
+    # defaults. The evaluation harness fills them in: the night index
+    # is floor(merger_mjd + time_days - 0.5), and the dust map is read
+    # at ra_deg, dec_deg.
+    ra_deg: float = float("nan")
+    dec_deg: float = float("nan")
+    galactic_b_deg: float = float("nan")
+    merger_mjd: float = 60000.0
 
 
 @dataclass(frozen=True)
@@ -1134,17 +1142,23 @@ def _blank_diagnosis(window_days: float) -> dict[str, object]:
 def diagnose_catch_window(
     observed: pd.DataFrame,
     window_days: float,
+    merger_mjd: float = 60000.0,
 ) -> dict[str, object]:
     """Measure the rules on detections inside ``window_days`` of the merger.
 
-    The window starts at the merger. ``judgeable`` is true when there
-    are at least two epochs and at least one g minus r color, so the
-    fade rule and the color rule can both be measured. A reddening
-    result of ``skipped`` means there were not two colors to fit. That
-    does not reject the object. Fade and color use ``not_enough_data``
-    instead of skipping: too little data fails those two rules.
-    ``below_cut`` means the number was measured and it was on the wrong
-    side of the placeholder cut.
+    The window starts at the merger. ``judgeable`` uses the frozen rule
+    in ``judge.py``: two detections in one band at signal-to-noise of
+    5 or more and at least 0.5 days apart, plus one night with both g
+    and r at that signal-to-noise. The filter cuts are not part of it.
+    ``merger_mjd`` sets which visits share a night via
+    ``floor(MJD - 0.5)``. The default is only for a table that has no
+    merger time of its own.
+
+    A reddening result of ``skipped`` means there were not two colors
+    to fit. That does not reject the object. Fade and color use
+    ``not_enough_data`` instead of skipping: too little data fails
+    those two rules. ``below_cut`` means the number was measured and
+    it was on the wrong side of the placeholder cut.
     """
     visible = light_curve_for_the_filter(observed, window_days)
     if visible.empty:
@@ -1184,9 +1198,9 @@ def diagnose_catch_window(
     else:
         reddening_result = "below_cut"
 
-    judgeable = _epoch_count(visible["time_days"].to_numpy()) >= 2 and (
-        len(g_minus_r_over_time(visible)) >= 1
-    )
+    # The full table, not the already-cut window: is_judgeable drops
+    # every row after `window_days` itself, including non-detections.
+    judgeable = is_judgeable(observed, window_days, merger_mjd=merger_mjd)
     verdict = is_kilonova_candidate(visible)
     return {
         "n_detections_in_window": int(len(visible)),
@@ -1375,7 +1389,11 @@ def build_recall_set(
             caught_later = False
         else:
             never = observed.empty
-            diagnosis = diagnose_catch_window(observed, survey.catch_within_days)
+            diagnosis = diagnose_catch_window(
+                observed,
+                survey.catch_within_days,
+                merger_mjd=event.merger_mjd,
+            )
             caught_later = _candidate_in_window(observed, CONTEXT_WINDOW_DAYS)
         event_rows.append(
             _event_row(
@@ -1651,10 +1669,11 @@ def _diagnostic_lines(events: pd.DataFrame) -> list[str]:
     caught_judge = int((judgeable & events["is_candidate"].astype(bool)).sum())
     lines.append(
         f"Judgeable fakes: {n_judge} of {total}. "
-        "A fake is judgeable when the first 3 days after the merger "
-        "hold at least two detections at different times and at least "
-        "one g minus r color, so the fade rule and the color rule can "
-        "both be measured."
+        "A fake is judgeable by day 3 when it has two detections in the "
+        "same band at signal-to-noise of 5 or more, at least 0.5 days "
+        "apart, and one night with both g and r at that signal-to-noise. "
+        "The filter cuts are not part of this. A night is floor(MJD - 0.5), "
+        "which changes at noon UTC."
     )
     if n_judge:
         low, high = wilson_interval(caught_judge, n_judge)
@@ -1821,7 +1840,11 @@ def _write_sanity_fake(
         never = False
         caught_later = False
     else:
-        diagnosis = diagnose_catch_window(observed, survey.catch_within_days)
+        diagnosis = diagnose_catch_window(
+            observed,
+            survey.catch_within_days,
+            merger_mjd=event.merger_mjd,
+        )
         caught_later = _candidate_in_window(observed, CONTEXT_WINDOW_DAYS)
         never = observed.empty
         if int(diagnosis["n_detections_in_window"]) == 0:

@@ -1,0 +1,254 @@
+"""Wilson intervals, the pick order, the stopping rule, and exclusion of copies."""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from kilonova_hunter.config import THRESHOLDS
+from kilonova_hunter.grid import (
+    PreparedFake,
+    chance_wilson_lower_at_least,
+    fast_verdict_matches_filter,
+    grid_combinations,
+    load_settings,
+    pick_by_recall,
+    pick_with_flag_limit,
+    score_prepared,
+)
+from kilonova_hunter.inject import simulate_kilonova_light_curve
+from kilonova_hunter.recall import wilson_interval
+from kilonova_hunter.sample import (
+    SampleSizeSettings,
+    next_batch_size,
+    sample_status,
+)
+from kilonova_hunter.villar import (
+    EXACT_KIND,
+    VillarSpread,
+    clipped_lognormal_mass,
+    truncated_normal_speed,
+)
+
+
+def test_wilson_interval_stays_inside_zero_and_one() -> None:
+    """Empty, all failures, and all successes have the usual edges."""
+    empty_low, empty_high = wilson_interval(0, 0)
+    assert empty_low != empty_low and empty_high != empty_high
+    low, high = wilson_interval(0, 10)
+    assert low == 0.0
+    assert 0.0 < high < 1.0
+    low, high = wilson_interval(10, 10)
+    assert 0.0 < low < 1.0
+    assert high == pytest.approx(1.0)
+    low, high = wilson_interval(1, 3)
+    assert 0.0 <= low <= 1.0 / 3.0 <= high <= 1.0
+
+
+def test_the_grid_has_the_72_combinations() -> None:
+    """Four color cuts, three rises, three windows, two gaps."""
+    rows = grid_combinations()
+    assert len(rows) == 4 * 3 * 3 * 2
+    assert {row["redder_than_g_minus_r"] for row in rows} == {0.0, 0.2, 0.4, 0.6}
+    assert {row["min_g_minus_r_rise"] for row in rows} == {0.1, 0.2, 0.3}
+    assert {row["reddening_window_days"] for row in rows} == {2.0, 3.0, 5.0}
+    assert {row["min_color_separation_days"] for row in rows} == {0.5, 1.0}
+
+
+def test_pick_keeps_the_band_near_the_best_recall_then_the_strict_order() -> None:
+    """Higher g-r, then bigger rise, then larger gap, then shorter window."""
+    settings = load_settings()
+    rows = [
+        _row(0.90, 0.0, 0.1, 0.5, 5.0),
+        _row(0.86, 0.4, 0.1, 0.5, 5.0),
+        _row(0.86, 0.4, 0.3, 0.5, 5.0),
+        _row(0.84, 0.6, 0.3, 1.0, 2.0),
+    ]
+    chosen = pick_by_recall(rows, settings)
+    # 0.84 is more than 5 points under 0.90, so the strictest in-band row
+    # is the 0.4 color cut with the bigger rise.
+    assert chosen["redder_than_g_minus_r"] == 0.4
+    assert chosen["min_g_minus_r_rise"] == 0.3
+    assert chosen["best_recall"] == 0.90
+
+
+def test_a_larger_gap_beats_a_shorter_window_when_the_recall_ties() -> None:
+    """Gap is the third key. Window is the fourth, and shorter wins a tie there."""
+    settings = load_settings()
+    rows = [
+        _row(0.90, 0.4, 0.3, 0.5, 2.0),
+        _row(0.90, 0.4, 0.3, 1.0, 5.0),
+    ]
+    chosen = pick_by_recall(rows, settings)
+    assert chosen["min_color_separation_days"] == 1.0
+    assert chosen["reddening_window_days"] == 5.0
+    tied_window = [
+        _row(0.90, 0.4, 0.3, 1.0, 5.0),
+        _row(0.90, 0.4, 0.3, 1.0, 2.0),
+    ]
+    shorter = pick_by_recall(tied_window, settings)
+    assert shorter["reddening_window_days"] == 2.0
+
+
+def test_flag_limit_prefers_recall_inside_the_limit_and_says_when_nobody_meets_it() -> (
+    None
+):
+    """At most 10 flags per night, then the recall band, then the order."""
+    settings = load_settings()
+    rows = [
+        {**_row(0.90, 0.0, 0.1, 0.5, 5.0), "flags_per_night": 40.0},
+        {**_row(0.86, 0.4, 0.2, 1.0, 3.0), "flags_per_night": 8.0},
+        {**_row(0.86, 0.4, 0.1, 0.5, 2.0), "flags_per_night": 8.0},
+    ]
+    chosen = pick_with_flag_limit(rows, settings)
+    assert chosen["limit_met"] is True
+    assert chosen["min_g_minus_r_rise"] == 0.2
+    none = [
+        {**_row(0.90, 0.0, 0.1, 0.5, 5.0), "flags_per_night": 12.0},
+        {**_row(0.88, 0.6, 0.3, 1.0, 5.0), "flags_per_night": 11.0},
+        {**_row(0.70, 0.6, 0.3, 1.0, 2.0), "flags_per_night": 15.0},
+    ]
+    fallback = pick_with_flag_limit(none, settings)
+    assert fallback["limit_met"] is False
+    # 0.70 is outside 5 points of 0.90, so the fewest flags in the band is 11.
+    assert fallback["flags_per_night"] == 11.0
+
+
+def test_sample_size_defaults_and_the_three_stopping_outcomes() -> None:
+    """Target 400, cap 20000, floor 50, batches of 500."""
+    settings = SampleSizeSettings()
+    assert settings.target_judgeable == 400
+    assert settings.cap == 20_000
+    assert settings.untestable_floor == 50
+    assert settings.batch_size == 500
+    assert sample_status(500, 400, settings) == "ready"
+    assert sample_status(20_000, 40, settings) == "untestable"
+    assert sample_status(20_000, 80, settings) == "underpowered"
+    assert sample_status(500, 10, settings) == "continue"
+    # The last batch shrinks so the cap is not crossed.
+    assert next_batch_size(19_700, settings) == 300
+    assert next_batch_size(20_000, settings) == 0
+
+
+def test_power_is_one_when_every_draw_would_clear_the_bar() -> None:
+    """Twenty out of twenty has a Wilson lower bound above 70 percent."""
+    assert chance_wilson_lower_at_least(20, 1.0, 0.70) == 1.0
+    low, _high = wilson_interval(20, 20)
+    assert low >= 0.70
+
+
+def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
+    """A copy mixed into the table does not change n_total."""
+    prepared = [
+        PreparedFake(
+            object_id="realistic-tuning-00000",
+            distance_mpc=40.0,
+            judgeable=True,
+            model_failed=False,
+            fade_passed=True,
+            color_value=0.5,
+            rises={(2.0, 0.5): 0.4},
+        )
+    ]
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    # The scorer's exclusion happens before prepare_fakes. Score the
+    # prepared list, and check a frame that still contains a copy is
+    # reduced by the helper the scorer uses.
+    row = score_prepared(
+        prepared,
+        combo,
+        population="realistic",
+        day=3.0,
+        status="ready",
+    )
+    assert row["n_total"] == 1
+    assert row["n_caught"] == 1
+    assert row["n_caught_not_judgeable"] == 0
+    events = pd.DataFrame(
+        {
+            "object_id": ["realistic-tuning-00000", f"{EXACT_KIND}-000"],
+            "kind": ["realistic", EXACT_KIND],
+            "distance_mpc": [40.0, 40.0],
+            "merger_mjd": [60000.0, 60000.0],
+            "model_failed": [0, 0],
+        }
+    )
+    from kilonova_hunter.grid import _without_exact_copies
+
+    kept = _without_exact_copies(events)
+    assert list(kept["object_id"]) == ["realistic-tuning-00000"]
+
+
+def test_fast_scores_match_the_filter_on_the_demo_curve() -> None:
+    """The grid's shortcut and is_kilonova_candidate agree."""
+    curve = simulate_kilonova_light_curve(noise_mag=0.0)
+    visible = curve.loc[curve["time_days"] <= 3.0]
+    combo = {
+        "redder_than_g_minus_r": THRESHOLDS.redder_than_g_minus_r,
+        "min_g_minus_r_rise": THRESHOLDS.min_g_minus_r_rise,
+        "reddening_window_days": THRESHOLDS.reddening_window_days,
+        "min_color_separation_days": THRESHOLDS.min_color_separation_days,
+    }
+    assert fast_verdict_matches_filter(visible, combo) is True
+
+
+def test_observing_one_fake_does_not_ask_the_filter(monkeypatch) -> None:
+    """The batch counter is not allowed to look at the filter."""
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("the filter was called during simulation")
+
+    monkeypatch.setattr("kilonova_hunter.filter.is_kilonova_candidate", boom)
+    monkeypatch.setattr("kilonova_hunter.recall.is_kilonova_candidate", boom)
+    from kilonova_hunter.recall import SurveySettings, at2017gfo_like_event
+    from kilonova_hunter.sample import _simulate_one
+
+    survey = SurveySettings(
+        cadence="simple",
+        revisit_gap_days=0.5,
+        nightly_gap_days=0.0,
+        survey_length_days=2.0,
+    )
+    _simulate_one(
+        {
+            "population": "stub",
+            "event": at2017gfo_like_event(),
+            "survey": survey,
+            "seed": 1,
+        }
+    )
+
+
+def test_mass_is_clipped_and_speed_is_redrawn() -> None:
+    """A very wide mass draw piles up on the edge. A wide speed draw does not."""
+    rng = np.random.default_rng(4)
+    wide_mass = VillarSpread(mass_sigma_dex=8.0, mass_clip_dex=0.5)
+    masses = [clipped_lognormal_mass(rng, 0.020, wide_mass) for _ in range(400)]
+    log_mass = np.log10(masses)
+    center = np.log10(0.020)
+    assert np.all(np.abs(log_mass - center) <= 0.5 + 1e-9)
+    on_edge = np.mean(np.isclose(np.abs(log_mass - center), 0.5, atol=1e-6))
+    assert on_edge > 0.8
+    wide_speed = VillarSpread(velocity_sigma_fraction=30.0)
+    speeds = [truncated_normal_speed(rng, 0.266, wide_speed) for _ in range(400)]
+    assert min(speeds) >= 0.05
+    assert max(speeds) <= 0.4
+    on_a_limit = np.mean(
+        np.isclose(speeds, 0.05, atol=1e-8) | np.isclose(speeds, 0.4, atol=1e-8)
+    )
+    assert on_a_limit < 0.05
+
+
+def _row(recall: float, color: float, rise: float, gap: float, window: float) -> dict:
+    return {
+        "recall_judgeable": recall,
+        "redder_than_g_minus_r": color,
+        "min_g_minus_r_rise": rise,
+        "min_color_separation_days": gap,
+        "reddening_window_days": window,
+        "untestable": False,
+    }

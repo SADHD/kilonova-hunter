@@ -157,6 +157,92 @@ def build_parser() -> argparse.ArgumentParser:
             "one day between visits of that band."
         ),
     )
+    recall.add_argument(
+        "--grid",
+        action="store_true",
+        help=(
+            "Simulate the 2017-like and realistic sets, then score the "
+            "72-combination tuning grid. Does not pick cuts and does not "
+            "score the test set."
+        ),
+    )
+    recall.add_argument(
+        "--fetch-alerts",
+        action="store_true",
+        help=(
+            "Download Fink ZTF alerts (class Unknown) and write "
+            "results/real_alert_slices.json. The slices are a ZTF proxy for Rubin."
+        ),
+    )
+    recall.add_argument(
+        "--score-test",
+        action="store_true",
+        help=(
+            "Score the cached test split once, using the cuts in --cuts. "
+            "Does not retune."
+        ),
+    )
+    recall.add_argument(
+        "--cuts",
+        type=Path,
+        default=None,
+        help="JSON file of frozen cuts for --score-test.",
+    )
+    recall.add_argument(
+        "--target",
+        type=int,
+        default=400,
+        help=(
+            "Stop after a batch that reaches this many day-3 "
+            "judgeable fakes. Default: 400."
+        ),
+    )
+    recall.add_argument(
+        "--cap",
+        type=int,
+        default=20000,
+        help="Most fakes to simulate in one set and split. Default: 20000.",
+    )
+    recall.add_argument(
+        "--floor",
+        type=int,
+        default=50,
+        help="Below this many day-3 judgeable fakes, day 3 is untestable. Default: 50.",
+    )
+    recall.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="Fakes drawn between judgeable counts. Default: 500.",
+    )
+    recall.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel light-curve workers for --grid. Default: 1.",
+    )
+    recall.add_argument(
+        "--output",
+        type=Path,
+        default=Path("results"),
+        help="Where --grid and --fetch-alerts write. Default: results/.",
+    )
+    recall.add_argument(
+        "--cache",
+        type=Path,
+        default=Path("data") / "recall" / "cache",
+        help="Where simulated light curves are reused. Default: data/recall/cache/.",
+    )
+    recall.add_argument(
+        "--alert-start",
+        default="2024-06-01",
+        help="First calendar day for --fetch-alerts. Default: 2024-06-01.",
+    )
+    recall.add_argument(
+        "--alert-stop",
+        default="2024-06-20",
+        help="Last calendar day for --fetch-alerts. Default: 2024-06-20.",
+    )
     return parser
 
 
@@ -179,6 +265,15 @@ def main(argv: list[str] | None = None) -> None:
         _run_check(args.light_curve)
         return
     if args.command == "recall":
+        if args.fetch_alerts:
+            _run_fetch_alerts(args.output, args.alert_start, args.alert_stop)
+            return
+        if args.grid:
+            _run_grid(args)
+            return
+        if args.score_test:
+            _run_score_test(args)
+            return
         _run_recall(args.set_size, args.seed, args.which, args.cadence)
         return
     # Running `kilohunt` with no command should explain itself, the way
@@ -209,6 +304,133 @@ def _run_demo(output: Path, seed: int, save_csv: Path | None) -> None:
 
     print("Filter verdict for the noise-free curve:")
     print(_format_verdict(is_kilonova_candidate(noise_free)))
+
+
+def _run_fetch_alerts(output: Path, start: str, stop: str) -> None:
+    """Download the ZTF proxy slices and write the frozen JSON."""
+    from datetime import date
+
+    from kilonova_hunter.alerts import (
+        build_slice_document,
+        fetch_class_between,
+        write_slice_document,
+    )
+
+    try:
+        start_day = date.fromisoformat(start)
+        stop_day = date.fromisoformat(stop)
+    except ValueError:
+        _fail("alert dates must look like 2024-06-01.")
+    if stop_day < start_day:
+        _fail("--alert-stop must be on or after --alert-start.")
+    alerts = fetch_class_between(start_day, stop_day)
+    if alerts.empty:
+        _fail("Fink returned no alerts for that date range.")
+    document = build_slice_document(alerts, start=start_day, stop=stop_day)
+    path = output / "real_alert_slices.json"
+    write_slice_document(document, path)
+    alerts_path = output / "ztf_proxy_alerts.csv"
+    alerts.to_csv(alerts_path, index=False)
+    tuning = document["tuning"]
+    test = document["test"]
+    print(f"Label: {document['label']}")
+    print(f"Wrote {path}")
+    print(
+        f"Tuning: {tuning['n_nights']} nights, {tuning['n_alerts']} alerts. "
+        f"Test: {test['n_nights']} nights, {test['n_alerts']} alerts."
+    )
+    print(document["night_formula"])
+
+
+def _run_score_test(args) -> None:
+    """Score the cached test split once. Refuses to simulate or to retune."""
+    import json
+
+    from kilonova_hunter.grid import format_test_score, score_with_frozen_cuts
+    from kilonova_hunter.sample import LIKE_KIND, REALISTIC, _read_cache
+
+    if args.cuts is None:
+        _fail("--score-test needs --cuts pointing at a JSON file of frozen cuts.")
+    if not args.cuts.is_file():
+        _fail(f"--cuts file does not exist: {args.cuts}")
+    cuts = json.loads(args.cuts.read_text(encoding="utf-8"))
+    needed = (
+        "redder_than_g_minus_r",
+        "min_g_minus_r_rise",
+        "reddening_window_days",
+        "min_color_separation_days",
+    )
+    missing = [name for name in needed if name not in cuts]
+    if missing:
+        _fail(f"--cuts is missing {', '.join(missing)}.")
+    combo = {name: float(cuts[name]) for name in needed}
+    cache = Path("data") / "recall" / "cache"
+    by_population = {}
+    for population in (LIKE_KIND, REALISTIC):
+        loaded = _read_cache(cache / population / "test")
+        if loaded is None:
+            _fail(
+                f"No cached test split for {population}. "
+                "Simulate it before scoring. This command does not simulate."
+            )
+        manifest, events, curves = loaded
+        if manifest.get("status") == "running":
+            _fail(
+                f"The {population} test cache is incomplete. "
+                "Finish the simulation first."
+            )
+        by_population[population] = score_with_frozen_cuts(
+            events,
+            curves,
+            combo,
+            population=population,
+            status=str(manifest.get("status", "ready")),
+        )
+    text = format_test_score(
+        by_population,
+        dry_run=any(
+            (_read_cache(cache / population / "test") or ({},))[0].get("dust_mode")
+            != "sfd"
+            for population in (LIKE_KIND, REALISTIC)
+        ),
+        provisional=bool(cuts.get("provisional", False)),
+    )
+    destination = args.output / "test_score.md"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text + "\n", encoding="utf-8")
+    print(text)
+
+
+def _run_grid(args) -> None:
+    """Simulate and score the tuning grid. Does not pick or score the test set."""
+    import logging
+
+    from kilonova_hunter.grid import run_tuning_grid
+    from kilonova_hunter.sample import SampleSizeSettings
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    try:
+        size = SampleSizeSettings(
+            target_judgeable=args.target,
+            cap=args.cap,
+            untestable_floor=args.floor,
+            batch_size=args.batch_size,
+        )
+    except ValueError as error:
+        _fail(str(error))
+    if not redback_available():
+        _fail(
+            "kilohunt recall --grid needs the redback library. Install it with:\n"
+            "    uv sync --extra sim"
+        )
+    print(
+        run_tuning_grid(
+            output_dir=args.output,
+            cache_dir=args.cache,
+            sample_size=size,
+            workers=max(1, args.workers),
+        )
+    )
 
 
 def _run_recall(set_size: int, seed: int | None, which: str, cadence: str) -> None:

@@ -151,8 +151,9 @@ uv run kilohunt check output/demo_kilonova.csv
 
 `kilohunt recall` asks a published model how a neutron-star merger would
 look, then asks the v1 rules whether they would have caught it. Recall
-is the fraction that were caught. The cuts are still the placeholders
-in `config.py`. The number is not a tuned result.
+among judgeable fakes describes the filter. The catch rate, caught
+divided by every fake, is the survey-level number. The cuts in
+`config.py` are still placeholders. The grid does not edit them.
 
 The physical model is [redback](https://github.com/nikhil-sarin/redback).
 It is optional, so `uv sync` and the tests stay small:
@@ -162,25 +163,66 @@ uv sync --extra sim
 uv run kilohunt recall --set-size 20 --which test
 ```
 
-`--set-size` is how many fakes (default 200). `--which` is `tuning`,
-`test`, or `both` (the default). The printed recall is always the test
-set when that set was built. `--seed` starts the random draw. With
-`both`, the test set uses that seed plus 10000, so the two lists are
-not the same events. `--cadence wfd` (the default) visits a field every
-2 to 4 nights and takes two filters about 30 minutes apart.
-`--cadence simple` gives each band its own clock. "Within 3 days" is
-3 days after the merger, not after the first detection. The depth in
-each band is the single-visit 5-sigma value from Ivezić et al. 2019,
-Table 2.
+`--set-size` is how many fakes (default 200) for that older command.
+`--which` is `tuning`, `test`, or `both` (the default). `--cadence wfd`
+(the default) visits a field every 2 to 4 nights and takes two filters
+about 30 minutes apart. "Within 3 days" is 3 days after the merger.
+The depth in each band is the single-visit 5-sigma value from
+Ivezić et al. 2019, Table 2.
+
+A fake is **judgeable** by day D when, using only the visits and the
+signal-to-noise, it has two detections in the same band at
+signal-to-noise of 5 or more and at least 0.5 days apart, and one night
+with both a g and an r detection at that signal-to-noise. For the
+simulated fakes a night is `floor(MJD - 0.5)`, which changes at noon
+UTC. The filter cuts are not part of this. Days 3, 5, and 7 are each
+recomputed from the points up to that day.
+
+There are two populations. **Realistic** fakes use redback's
+`two_component_bns_ejecta_relation`, whose default ejecta class is
+`redback.ejecta_relations.TwoComponentBNS` (Coughlin et al. 2019).
+**2017-like** fakes use `three_component_kilonova_model` and the
+spherical three-component numbers in Table 2 of Villar et al. 2017
+(arXiv:1710.11576). Each component is drawn on its own: mass is
+log-normal with sigma 0.2 dex, clipped to plus or minus 0.5 dex, and
+speed is a truncated normal with sigma 20 percent of the table value,
+kept between 0.05c and 0.4c. Opacity stays fixed. One hundred exact
+copies of that table, at 40 Mpc, are reported separately and are not
+in any recall number.
+
+Distances are uniform in comoving volume from 10 to 300 Mpc. The
+redshift is read from astropy's Planck18 cosmology, and redback applies
+it to the clock and to the wavelengths. Milky Way dust for the grid is
+the SFD map times 0.86 (Schlafly and Finkbeiner 2011), turned into
+magnitudes with the Fitzpatrick 1999 law at R_V = 3.1. Sky positions
+are uniform on the sphere inside -70 degrees < dec < +12 degrees and
+outside the Galactic plane (|b| > 15 degrees). That strip is a stand-in
+for the Rubin footprint, not the official map. The map files live in
+`data/dustmaps/sfd/`, which git ignores. If they are missing, the grid
+is labeled a dry run and uses the older exponential E(B-V) instead.
+
+The evaluation command draws fakes in batches of 500 until 400 are
+judgeable at day 3, and stops at 20,000 even if that target is not met.
+It does not look at the filter while deciding to stop. Light curves
+are cached under `data/recall/cache/` so the grid does not simulate
+them again.
+
+```bash
+uv run kilohunt recall --grid --workers 4
+```
+
+That writes `results/tuning_grid.csv` and `results/tuning_grid.md`.
+It scores the tuning split only. `kilohunt recall --score-test --cuts
+<file>` scores the cached test split once and does not retune.
+
+`kilohunt recall --fetch-alerts` downloads a ZTF proxy for Rubin from
+Fink's public API (class `Unknown`) and writes
+`results/real_alert_slices.json`. A ZTF night is `floor(MJD - 20/24)`,
+which changes at 20:00 UTC, local noon at Palomar in Pacific Standard
+Time. The tuning and test slices do not share a night.
 
 The light-curve model is a sphere. Each fake still gets a random
-viewing angle, and that angle is saved in the table, but it does not
-change the brightness. The v1 validation plan asked for the angle to
-matter. This model cannot do that. A later model can read the saved
-angle.
-
-The tables land in `data/recall/`, which git ignores. Tune on the
-tuning set only. The test set is the score.
+viewing angle, saved in the table, that does not change the brightness.
 
 ## Run the tests and the style check
 
