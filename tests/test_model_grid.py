@@ -1,5 +1,7 @@
 """The two-component model ends at source-frame day 6. Later times are NaN."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -142,3 +144,71 @@ def test_real_three_component_day_7_is_not_frozen() -> None:
     magnitudes = villar_magnitudes(times, np.array(["g", "g"]), event)
     assert np.all(np.isfinite(magnitudes))
     assert magnitudes[0] != pytest.approx(magnitudes[1], abs=0.01)
+
+
+def test_real_two_component_model_is_nan_past_source_frame_day_6() -> None:
+    """At z = 0.06 the cap is 6.36 observer days. 6.35 stays, 6.37 does not.
+
+    Days 7 and 10 are NaN as well. This calls the installed
+    two-component model, then the cap.
+    """
+    pytest.importorskip("redback")
+    from dataclasses import replace
+
+    from kilonova_hunter.recall import at2017gfo_like_event, redback_magnitudes
+
+    event = replace(at2017gfo_like_event(), redshift=0.06, ebv=0.0)
+    times = np.array([6.35, 6.37, 7.0, 10.0])
+    magnitudes = redback_magnitudes(times, np.array(["g", "g", "g", "g"]), event)
+    assert np.isfinite(magnitudes[0])
+    assert np.isnan(magnitudes[1])
+    assert np.isnan(magnitudes[2])
+    assert np.isnan(magnitudes[3])
+
+
+def test_dense_grid_bolometric_ratios_stay_off_the_sparse_mistake() -> None:
+    """The Waxman ratios are 0.692, 0.810, 1.213, and 1.584, within 0.02.
+
+    Calling the private model only at the data times drops the early
+    diffusion integral and makes day 0.5 look like a ratio of about 0.08.
+    """
+    pytest.importorskip("redback")
+    import pandas as pd
+    from redback.transient_models.kilonova_models import _one_component_kilonova_model
+    from redback.utils import get_optimal_time_array
+
+    from kilonova_hunter.redback_fix import corrected_diffusion
+    from kilonova_hunter.sky import redshift_at_luminosity_distance
+    from kilonova_hunter.villar import BLUE, EXACT_DISTANCE_MPC, PURPLE, RED
+
+    root = Path(__file__).resolve().parents[1]
+    waxman = pd.read_csv(
+        root / "docs" / "at2017gfo_bolometric_waxman2018.csv",
+        comment="#",
+    )
+    redshift = redshift_at_luminosity_distance(EXACT_DISTANCE_MPC)
+    user_source_seconds = waxman["time_days"].to_numpy(dtype=float) * 86400.0 / (
+        1.0 + redshift
+    )
+    source_seconds = get_optimal_time_array(
+        1e-2, 7e6, 300, user_times=user_source_seconds
+    )
+    total = np.zeros(len(source_seconds), dtype=float)
+    with corrected_diffusion():
+        for component in (BLUE, PURPLE, RED):
+            luminosity, _temperature, _radius = _one_component_kilonova_model(
+                source_seconds,
+                component["mej"],
+                component["vej"],
+                component["kappa"],
+                temperature_floor=component["temperature_floor"],
+            )
+            total += np.asarray(luminosity, dtype=float)
+    observer_days = source_seconds / 86400.0 * (1.0 + redshift)
+    expected = {0.5: 0.692, 0.8: 0.810, 1.5: 1.213, 7.5: 1.584}
+    for day, target in expected.items():
+        model = float(np.interp(day, observer_days, total))
+        published = float(
+            waxman.loc[np.isclose(waxman["time_days"], day), "l_int_erg_s"].iloc[0]
+        )
+        assert model / published == pytest.approx(target, abs=0.02)
