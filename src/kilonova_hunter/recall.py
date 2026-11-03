@@ -89,6 +89,7 @@ from kilonova_hunter.features import (
 )
 from kilonova_hunter.filter import format_verdict, is_kilonova_candidate
 from kilonova_hunter.judge import is_judgeable
+from kilonova_hunter.tns import TNS_STATUS_LINE
 
 logger = logging.getLogger(__name__)
 
@@ -1563,6 +1564,7 @@ def format_recall_report(
     lines.append(
         "Recall uses the placeholder cuts in config.py. They have not been tuned."
     )
+    lines.append(TNS_STATUS_LINE)
     lines.append(
         "Fade faster than "
         f"{THRESHOLDS.fade_faster_than_mag_per_day:.2f} mag/day, "
