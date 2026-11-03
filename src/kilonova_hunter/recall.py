@@ -48,8 +48,9 @@ function:
 - The default survey is a simple wide-fast-deep pattern, not Rubin's
   real scheduler. A field is revisited every 2 to 4 nights. Each visit
   is two exposures about 30 minutes apart, in two of g, r, and i
-  (pairs such as g+r, r+i, or g+i). The first visit is at a random
-  time in that gap, so the merger is not always just before a visit.
+  (pairs such as g+r, r+i, or g+i). The sequence is already running
+  before the merger. The merger is dropped in at a random time, and
+  only the visits after it are kept.
   ``--cadence simple`` keeps the older pattern: each band on its own
   clock, at least one day between visits of that band.
 - A point fainter than that band's limiting magnitude is a
@@ -249,9 +250,8 @@ class SurveySettings:
             revisits a field every few nights and takes two filters
             half an hour apart. Simple gives each band its own clock.
         wfd_gap_min_days: Shortest wait between wide-fast-deep visits.
-        wfd_gap_max_days: Longest wait between those visits. The first
-            visit is also placed at random between 0 and this number,
-            which is the start phase relative to the merger.
+        wfd_gap_max_days: Longest wait between those visits. The same
+            range is used before and after the merger.
         revisit_gap_days: For the simple cadence, the minimum wait
             between two visits of the same band.
         nightly_gap_days: For the simple cadence, an extra random wait
@@ -625,32 +625,67 @@ def survey_visits(
     return _simple_visits(rng, survey)
 
 
+# The wide-fast-deep sequence is already running when the merger
+# happens. Thirty days is several revisits, so the merger is not a
+# special first night and there is no separate 0-to-4 day first wait.
+_WFD_PRE_MERGER_DAYS = 30.0
+
+
+def _wfd_pair_starts(
+    rng: np.random.Generator,
+    survey: SurveySettings,
+) -> np.ndarray:
+    """Times when each visit pair starts, in days after the merger.
+
+    Gaps are drawn from the same 2 to 4 day range on both sides of the
+    merger. The merger is placed at a uniform random time inside one of
+    those gaps. Times before the merger are negative. The earliest pair
+    is at least ``_WFD_PRE_MERGER_DAYS`` before the merger.
+    """
+    low = survey.wfd_gap_min_days
+    high = survey.wfd_gap_max_days
+    gap = float(rng.uniform(low, high))
+    phase = float(rng.uniform(0.0, gap))
+    starts = [-phase]
+    clock = -phase
+    while clock > -_WFD_PRE_MERGER_DAYS:
+        clock -= float(rng.uniform(low, high))
+        starts.append(clock)
+    clock = gap - phase
+    while clock <= survey.survey_length_days:
+        starts.append(clock)
+        clock += float(rng.uniform(low, high))
+    starts.sort()
+    return np.asarray(starts, dtype=float)
+
+
 def _wfd_visits(
     rng: np.random.Generator,
     survey: SurveySettings,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Wide-fast-deep visits: two filters, then a gap of a few nights.
 
-    The first visit is a random phase between 0 and the longest gap, so
-    the merger can fall in the middle of a gap. Each later visit waits a
-    fresh random gap between the shortest and longest gap. On that night
-    the survey takes two exposures about 30 minutes apart, in a random
-    pair drawn from g+r, r+i, and g+i, in either order.
+    The survey is already visiting the field before the merger. Only
+    visits at or after the merger are returned. A pair that started
+    before the merger is dropped whole, so one filter of that pair is
+    never kept on its own. On each night the survey takes two exposures
+    about 30 minutes apart, in a random pair drawn from g+r, r+i, and
+    g+i, in either order.
     """
     times: list[float] = []
     bands: list[str] = []
-    clock = float(rng.uniform(0.0, survey.wfd_gap_max_days))
-    while clock <= survey.survey_length_days:
+    for clock in _wfd_pair_starts(rng, survey):
+        # A pair that started before the merger stays before it.
+        if float(clock) < 0.0 or float(clock) > survey.survey_length_days:
+            continue
         pair = _WFD_PAIRS[int(rng.integers(0, len(_WFD_PAIRS)))]
         if float(rng.random()) < 0.5:
             pair = (pair[1], pair[0])
         for offset, band in ((0.0, pair[0]), (_THIRTY_MINUTES_DAYS, pair[1])):
-            when = clock + offset
+            when = float(clock) + offset
             if when <= survey.survey_length_days:
                 times.append(when)
                 bands.append(band)
-        gap = float(rng.uniform(survey.wfd_gap_min_days, survey.wfd_gap_max_days))
-        clock += gap
     if not times:
         return np.array([], dtype=float), np.array([], dtype=str)
     order = np.argsort(times, kind="stable")
@@ -1649,7 +1684,8 @@ def _cadence_sentence(cadence: str) -> str:
             "Cadence: wide-fast-deep style, which is the default. "
             "A field is visited every 2 to 4 nights. Each visit is two "
             "exposures about 30 minutes apart, in two of g, r, and i. "
-            "The first visit is at a random time in that gap."
+            "That sequence starts before the merger. The merger is dropped "
+            "in at a random time, and only later visits are kept."
         )
     return (
         "Cadence: simple, not the default. Each of g, r, and i has its "
