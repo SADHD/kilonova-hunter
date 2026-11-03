@@ -541,6 +541,8 @@ def _read_cache(cache_dir: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame] | No
         events = _read_events_table(events_path)
     else:
         events = pd.DataFrame()
+    if curves_path.is_file() and curves_path.stat().st_size == 0:
+        raise ValueError(f"The light-curve table {curves_path} is empty.")
     if curves_path.is_file() and curves_path.stat().st_size > 0:
         try:
             curves = pd.read_csv(curves_path)
