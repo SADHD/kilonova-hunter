@@ -51,6 +51,8 @@ markers = [
 line-length = 88
 target-version = "py312"
 src = ["src", "tests", "notebooks"]
+# reference/ is the MOSFiT commit 6595248 text. Ruff must not reformat it.
+extend-exclude = ["checks/mosfit/reference"]
 
 [tool.ruff.lint]
 # E and F catch real mistakes. I sorts imports. UP modernizes syntax.
