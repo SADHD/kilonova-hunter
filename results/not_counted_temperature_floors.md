@@ -1,28 +1,42 @@
-# NOT-COUNTED temperature-floor variant
+# NOT-COUNTED sensitivity. Not part of any recall.
 
-This is not part of the recall, the catch rate, or the grid. The realistic
-set still uses redback's default floors: 5000 K for the wind and 2500 K
-for the dynamical ejecta.
+The realistic set keeps this project's assumptions: temperature floors
+5000 K (wind) and 2500 K (dynamical), opacities 0.5 (wind) and 10
+(dynamical). redback 1.20.0 does not default those numbers. `tf_1` and
+`tf_2` are required arguments. redback's shipped prior draws floors
+log-uniformly from 100 K to 6000 K and opacities uniformly from 1 to 30.
 
-The variant below changes only those two floors:
+The full realistic tuning population is 20,000 fakes. Resimulating that
+population twice, with the diffusion wrapper, is not cheap without the
+grid, so this is a fixed-cut summary of 24 fakes. They are one seeded
+realistic tuning batch (batch index 90), SFD dust, the diffusion
+wrapper, and the placeholder cuts in `config.py`. The same 24 masses,
+distances, and sky positions are used for every row.
 
-- dynamical ejecta, opacity 10: 3745 K. That matches Villar's red
-  component, which also has opacity 10.
-- wind, opacity 0.5: 1308 K. 1308 K is Villar's purple floor. The purple
-  component has opacity 3, and the wind has opacity 0.5, so this match
-  is not exact.
+## Survey score at day 3
 
-One event only, not a population. Masses 1.46 and 1.27 solar masses,
-40 Mpc, no dust, the two-component BNS model, with the diffusion
-wrapper on. g-band magnitude:
-
-| day | redback defaults 5000/2500 K | NOT-COUNTED 1308/3745 K | difference |
+| run | judgeable | caught | caught and judgeable |
 | --- | --- | --- | --- |
-| 0.5 | 18.892 | 18.892 | 0.000 |
-| 1.0 | 18.493 | 18.475 | -0.019 |
-| 2.0 | 19.327 | 19.278 | -0.049 |
-| 3.0 | 20.445 | 21.487 | +1.042 |
+| project floors 5000/2500 K, opacities 0.5/10 | 0 of 24 | 0 | 0 |
+| NOT-COUNTED floors 674 K wind, 3745 K dynamical | 0 of 24 | 0 | 0 |
+| NOT-COUNTED opacities drawn Uniform(1, 30) | 0 of 24 | 0 | 0 |
 
-A positive difference means the variant is fainter. Before day 1 the
-floors do not move g. By day 3 this one event is about 1.0 mag fainter
-with the variant floors. Do not fold that into any score.
+Zero judgeable in 24 is what a roughly 1 percent judgeable fraction
+predicts. It does not separate the variants. The magnitudes below do.
+
+## Median g magnitude, no extra cut
+
+| run | g at day 1 | g at day 3 |
+| --- | --- | --- |
+| project assumptions | 23.00 | 24.96 |
+| floors 674 K wind / 3745 K dynamical | 22.98 | 25.87 |
+| opacities Uniform(1, 30) | 26.00 | 26.48 |
+
+674 K matches Villar's blue component, which has opacity 0.5, the same
+opacity as the wind. 3745 K matches Villar's red component, which has
+opacity 10, the same opacity as the dynamical ejecta. At day 1 those
+floors barely move g (0.02 mag). At day 3 this sample is 0.91 mag
+fainter. Drawing both opacities from redback's Uniform(1, 30) prior
+makes the median g about 3.0 mag fainter at day 1.
+
+Do not fold any of these numbers into a recall.

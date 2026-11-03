@@ -20,14 +20,29 @@ be a different, wrong change: the time of the light curve would move.
 The patch is only valid for redback 1.20.0. A later redback that already
 includes the 2 would be doubled again. The test
 ``test_installed_redback_is_exactly_1_20_0`` fails in that case.
+
+One process runs one patched call at a time. A lock makes a second
+thread in that process wait, so one thread cannot restore the original
+function while another thread is still inside it. The recall grid uses
+a process pool. Each worker is its own process, with its own copy of
+this module, so the workers do not share the lock.
 """
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 REQUIRED_REDBACK_VERSION = "1.20.0"
+
+# Written on every cache manifest. A cache from before the wrapper does
+# not have this marker, so it is not reused and it cannot score the test set.
+DIFFUSION_FIX_ID = "arnett-factor-2"
+
+_PATCH_LOCK = threading.RLock()
+_PATCH_DEPTH = 0
+_PATCH_ORIGINAL = None
 
 
 def installed_redback_version() -> str:
@@ -59,30 +74,35 @@ def corrected_diffusion() -> Iterator[None]:
     Call the kilonova model inside this block. The model looks up
     ``_kilonova_diffusion_luminosity`` on the redback module when it
     runs, so replacing that name is enough. The original function is
-    put back even if the model raises.
+    put back even if the model raises. Matplotlib's ``text.usetex``
+    setting is put back to the value it had on the way in. redback
+    turns that setting on during the call.
     """
+    global _PATCH_DEPTH, _PATCH_ORIGINAL
+
     require_redback_1_20_0()
+    import matplotlib
     from redback.transient_models import kilonova_models
 
-    current = kilonova_models._kilonova_diffusion_luminosity
-    if getattr(current, "_hunter_diffusion_fix", False):
-        yield
-        return
+    previous_usetex = bool(matplotlib.rcParams["text.usetex"])
+    with _PATCH_LOCK:
+        _PATCH_DEPTH += 1
+        if _PATCH_DEPTH == 1:
+            original = kilonova_models._kilonova_diffusion_luminosity
 
-    original = current
+            def fixed(time, thermalised_luminosity, diffusion_timescale):
+                # The 2 is the missing piece of (2 t / t_d^2) in the integral.
+                # t_d is the third argument and is not changed.
+                return 2.0 * original(time, thermalised_luminosity, diffusion_timescale)
 
-    def fixed(time, thermalised_luminosity, diffusion_timescale):
-        # The 2 is the missing piece of (2 t / t_d^2) in the integral.
-        # t_d is the third argument and is not changed.
-        return 2.0 * original(time, thermalised_luminosity, diffusion_timescale)
-
-    fixed._hunter_diffusion_fix = True  # type: ignore[attr-defined]
-    kilonova_models._kilonova_diffusion_luminosity = fixed
-    try:
-        yield
-    finally:
-        kilonova_models._kilonova_diffusion_luminosity = original
-        # The model call can turn LaTeX back on. Put it back off.
-        import matplotlib
-
-        matplotlib.rcParams["text.usetex"] = False
+            fixed._hunter_diffusion_fix = True  # type: ignore[attr-defined]
+            _PATCH_ORIGINAL = original
+            kilonova_models._kilonova_diffusion_luminosity = fixed
+        try:
+            yield
+        finally:
+            _PATCH_DEPTH -= 1
+            if _PATCH_DEPTH == 0 and _PATCH_ORIGINAL is not None:
+                kilonova_models._kilonova_diffusion_luminosity = _PATCH_ORIGINAL
+                _PATCH_ORIGINAL = None
+            matplotlib.rcParams["text.usetex"] = previous_usetex

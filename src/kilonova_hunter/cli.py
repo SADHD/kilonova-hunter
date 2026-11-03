@@ -352,7 +352,13 @@ def _run_score_test(args) -> None:
     import json
 
     from kilonova_hunter.grid import format_test_score, score_with_frozen_cuts
-    from kilonova_hunter.sample import LIKE_KIND, REALISTIC, _read_cache
+    from kilonova_hunter.sample import (
+        LIKE_KIND,
+        REALISTIC,
+        _cache_paths,
+        _read_cache,
+        cache_refusal_reason,
+    )
     from kilonova_hunter.sky import dust_map_label
 
     destination = args.output / "test_score.md"
@@ -379,10 +385,26 @@ def _run_score_test(args) -> None:
         _fail(f"--cuts is missing {', '.join(missing)}.")
     combo = {name: float(cuts[name]) for name in needed}
     cache = Path(args.cache)
+    marker = _score_once_marker(cache)
+    if marker.is_file():
+        _fail(
+            f"{marker} already exists. The test set was scored once. "
+            "A different --output does not allow another score."
+        )
     expected_map = dust_map_label()
-    by_population = {}
+    loaded_sets = []
     for population in (LIKE_KIND, REALISTIC):
         folder = cache / population / "test"
+        manifest_path, events_path, curves_path = _cache_paths(folder)
+        if (
+            not manifest_path.is_file()
+            or not events_path.is_file()
+            or not curves_path.is_file()
+        ):
+            _fail(
+                f"No complete cached test split for {population} in {cache}. "
+                "Simulate it before scoring. This command does not simulate."
+            )
         loaded = _read_cache(folder)
         if loaded is None:
             _fail(
@@ -390,17 +412,27 @@ def _run_score_test(args) -> None:
                 "Simulate it before scoring. This command does not simulate."
             )
         manifest, events, curves = loaded
-        if manifest.get("status") == "running":
-            _fail(
-                f"The {population} test cache is incomplete. "
-                "Finish the simulation first."
-            )
-        if manifest.get("dust_map") != expected_map:
+        reason = cache_refusal_reason(manifest)
+        if reason is not None:
+            _fail(f"The {population} test cache is refused: {reason}")
+        if (
+            manifest.get("dust_mode") != "sfd"
+            or manifest.get("dust_map") != expected_map
+        ):
             _fail(
                 f"The {population} test cache has no recorded SFD provenance. "
                 f"dust_map is {manifest.get('dust_map')!r}. "
                 f"It has to be {expected_map!r}."
             )
+        expected_n = manifest.get("n_simulated")
+        if expected_n is None or int(expected_n) != len(events):
+            _fail(
+                f"The {population} test cache events do not match n_simulated "
+                f"({expected_n!r} vs {len(events)} rows)."
+            )
+        loaded_sets.append((population, manifest, events, curves))
+    by_population = {}
+    for population, manifest, events, curves in loaded_sets:
         by_population[population] = score_with_frozen_cuts(
             events,
             curves,
@@ -415,7 +447,29 @@ def _run_score_test(args) -> None:
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")
+    _write_score_once_marker(marker, combo)
     print(text)
+
+
+def _score_once_marker(cache: Path) -> Path:
+    """A file beside the test caches. It outlives the --output directory."""
+    return Path(cache) / "test_scored_once.json"
+
+
+def _write_score_once_marker(path: Path, combo: dict[str, float]) -> None:
+    """Record the cuts hash so a later score, even in another folder, stops."""
+    import hashlib
+    import json
+
+    payload = json.dumps(combo, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps({"cuts_sha256": digest, "cuts": combo}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def _run_grid(args) -> None:

@@ -445,7 +445,15 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
             encoding="utf-8",
         )
         (folder / "manifest.json").write_text(
-            json.dumps({"status": "ready", "dust_mode": "sfd"}),
+            json.dumps(
+                {
+                    "status": "ready",
+                    "dust_mode": "sfd",
+                    "cache_version": 2,
+                    "diffusion_fix": "arnett-factor-2",
+                    "n_simulated": 0,
+                }
+            ),
             encoding="utf-8",
         )
     with pytest.raises(SystemExit) as caught:
@@ -464,3 +472,90 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
     assert caught.value.code == 1
     assert "SFD provenance" in capsys.readouterr().err
     assert not (output / "test_score.md").exists()
+
+
+def test_score_test_rejects_a_continue_cache_and_a_second_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unfinished cache is refused, and a second output directory is too."""
+    from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
+    from kilonova_hunter.sample import CACHE_VERSION
+    from kilonova_hunter.sky import dust_map_label
+
+    output = tmp_path / "results"
+    output.mkdir()
+    other = tmp_path / "other-results"
+    other.mkdir()
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    for population in ("2017-like", "realistic"):
+        folder = cache / population / "test"
+        folder.mkdir(parents=True)
+        (folder / "events.csv").write_text("object_id\n", encoding="utf-8")
+        (folder / "light_curves.csv").write_text(
+            "object_id,time_days,filter,magnitude,magnitude_error\n",
+            encoding="utf-8",
+        )
+        (folder / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "status": "continue",
+                    "dust_mode": "sfd",
+                    "dust_map": dust_map_label(),
+                    "cache_version": CACHE_VERSION,
+                    "diffusion_fix": DIFFUSION_FIX_ID,
+                    "n_simulated": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "continue" in capsys.readouterr().err
+
+    for population in ("2017-like", "realistic"):
+        manifest = cache / population / "test" / "manifest.json"
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["status"] = "ready"
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    assert (cache / "test_scored_once.json").is_file()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(other),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "scored once" in capsys.readouterr().err
+    assert not (other / "test_score.md").exists()

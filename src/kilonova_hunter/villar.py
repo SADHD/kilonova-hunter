@@ -63,6 +63,12 @@ LIKE_KIND = "2017-like"
 # The 100 exact copies use this seed, not the tuning or test seed.
 EXACT_SEED = 20170817
 EXACT_COUNT = 100
+# Decision Log 12(16), proposed, not adopted. The report uses these.
+# Draw batches until this many copies are judgeable under definition (a),
+# and stop at the cap even if that count is not reached.
+EXACT_TARGET_JUDGEABLE = 50
+EXACT_CAP = 4000
+EXACT_BATCH_SIZE = 100
 EXACT_DISTANCE_MPC = 40.0
 
 
@@ -240,8 +246,11 @@ def villar_magnitudes(
     from kilonova_hunter.redback_fix import corrected_diffusion
 
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
-    # The temperature floors are positional on purpose. redback's default
-    # floor is 4000 K, which is not the Villar table.
+    # The temperature floors are positional arguments. In redback 1.20.0
+    # three_component_kilonova_model requires them. It does not default
+    # them to 4000 K. 4000 K is only the fallback inside
+    # _one_component_kilonova_model when a caller omits the floor.
+    # These calls pass the Villar table values: 674, 1308, and 3745 K.
     with corrected_diffusion():
         raw = three_component_kilonova_model(
             np.asarray(times, dtype=float),
@@ -284,11 +293,15 @@ def realistic_magnitudes(
     difference is the dust: Fitzpatrick 1999 at R_V = 3.1, not the
     fixed Schlafly and Finkbeiner band coefficients.
 
-    The temperature floors on the event are redback's defaults when the
-    recall built the event: 5000 K for the wind and 2500 K for the
-    dynamical ejecta. Those defaults stay. A NOT-COUNTED variant uses
-    different floors; that copy is ``not_counted_realistic_event`` and
-    it is not part of the recall.
+    The temperature floors on the event are this project's assumptions
+    when the recall built the event: 5000 K for the wind and 2500 K for
+    the dynamical ejecta. redback 1.20.0 does not default those floors.
+    ``tf_1`` and ``tf_2`` are required, and redback's prior draws them
+    log-uniformly from 100 K to 6000 K. The opacities 0.5 and 10 are
+    also this project's assumptions. redback's prior draws opacities
+    uniformly from 1 to 30. A NOT-COUNTED variant uses different floors
+    or those prior opacities. That copy is
+    ``not_counted_realistic_event`` and it is not part of the recall.
     """
     from astropy.cosmology import Planck18
     from redback.transient_models.kilonova_models import (
@@ -325,18 +338,22 @@ def realistic_magnitudes(
 # NOT-COUNTED. These floors are not used by the recall or the grid.
 # 3745 K is Villar's red floor. The realistic dynamical ejecta use
 # opacity 10, the same opacity as that red component.
-# 1308 K is Villar's purple floor. The realistic wind uses opacity 0.5,
-# while the purple component uses opacity 3, so that match is not exact.
+# 674 K is Villar's blue floor. The realistic wind uses opacity 0.5,
+# the same opacity as that blue component.
 NOT_COUNTED_TF_DYNAMICAL_K = 3745.0
-NOT_COUNTED_TF_WIND_K = 1308.0
+NOT_COUNTED_TF_WIND_K = 674.0
+# redback's shipped prior draws each opacity uniformly from 1 to 30.
+NOT_COUNTED_KAPPA_MIN = 1.0
+NOT_COUNTED_KAPPA_MAX = 30.0
 
 
 def not_counted_realistic_event(event):
     """Copy one realistic event onto the NOT-COUNTED temperature floors.
 
-    Do not put this copy into a recall, a catch rate, or the grid. It
-    exists so a report can show the same ejecta with floors matched to
-    Villar by opacity, beside the redback-default floors the recall uses.
+    3745 K goes on the dynamical ejecta (opacity 10, Villar's red
+    component). 674 K goes on the wind (opacity 0.5, Villar's blue
+    component). These are not redback defaults. Do not put this copy
+    into a recall, a catch rate, or the grid.
     """
     from dataclasses import replace
 

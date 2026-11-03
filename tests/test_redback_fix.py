@@ -101,6 +101,28 @@ def test_decaying_heating_matches_q_at_the_peak() -> None:
     assert peak_luminosity == pytest.approx(peak_heating, rel=0.02)
 
 
+def test_wrapper_doubles_bolometric_luminosity_and_restores_usetex() -> None:
+    """A real one-component call is twice as bright, and usetex is restored."""
+    import matplotlib
+    from redback.transient_models.kilonova_models import _one_component_kilonova_model
+
+    from kilonova_hunter.redback_fix import corrected_diffusion
+
+    time = np.linspace(0.2, 3.0, 40) * 86400.0
+    plain, _temperature, _radius = _one_component_kilonova_model(
+        time, 0.02, 0.266, 0.5, temperature_floor=674.0
+    )
+    matplotlib.rcParams["text.usetex"] = True
+    with corrected_diffusion():
+        fixed, _temperature, _radius = _one_component_kilonova_model(
+            time, 0.02, 0.266, 0.5, temperature_floor=674.0
+        )
+    assert matplotlib.rcParams["text.usetex"] is True
+    matplotlib.rcParams["text.usetex"] = False
+    ratio = fixed[10:] / plain[10:]
+    assert np.allclose(ratio, 2.0)
+
+
 def test_the_patch_is_removed_after_the_model_call() -> None:
     """redback's own function is back in place once the block ends."""
     from redback.transient_models import kilonova_models

@@ -46,7 +46,11 @@ from kilonova_hunter.config import THRESHOLDS, Thresholds
 from kilonova_hunter.features import g_minus_r_at_time, g_minus_r_rise, peak_time_days
 from kilonova_hunter.filter import evaluate_fade_rule, is_kilonova_candidate
 from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
-from kilonova_hunter.recall import light_curve_for_the_filter, wilson_interval
+from kilonova_hunter.recall import (
+    EARLY_GAP_MODEL_LIMIT,
+    light_curve_for_the_filter,
+    wilson_interval,
+)
 from kilonova_hunter.tns import TNS_STATUS_LINE
 from kilonova_hunter.villar import EXACT_KIND
 
@@ -354,9 +358,7 @@ def prepare_fakes(
         merger = float(row.merger_mjd)
         judgeable = False if failed else is_judgeable(curve, day, merger_mjd=merger)
         candidate = (
-            False
-            if failed
-            else is_candidate_judgeable(curve, day, merger_mjd=merger)
+            False if failed else is_candidate_judgeable(curve, day, merger_mjd=merger)
         )
         visible = light_curve_for_the_filter(curve, day)
         if failed or visible.empty:
@@ -482,9 +484,7 @@ def score_prepared(
     if low_mpc is not None and high_mpc is not None:
         if high_inclusive:
             chosen = [
-                fake
-                for fake in prepared
-                if low_mpc <= fake.distance_mpc <= high_mpc
+                fake for fake in prepared if low_mpc <= fake.distance_mpc <= high_mpc
             ]
         else:
             chosen = [
@@ -620,13 +620,20 @@ def score_exact_copies(
     E(B-V), and the rule that failed.
     """
     if events.empty:
+        empty_official = sanity_copy_verdict(0, 0)
+        empty_candidate = sanity_copy_verdict(0, 0)
         return {
             "n_copies": 0,
             "n_judgeable": 0,
             "n_judgeable_candidate": 0,
             "n_caught_judgeable": 0,
-            "fraction_judgeable_caught": float("nan"),
-            "blocker": True,
+            "n_caught_candidate": 0,
+            "fraction_judgeable_caught": empty_official["fraction"],
+            "fraction_candidate_caught": empty_candidate["fraction"],
+            "blocker": False,
+            "blocker_candidate": False,
+            "official": empty_official,
+            "candidate": empty_candidate,
             "misses": [],
         }
     by_id = _curves_by_id(curves)
@@ -634,6 +641,7 @@ def score_exact_copies(
     n_judge = 0
     n_candidate = 0
     n_caught = 0
+    n_caught_candidate = 0
     misses = []
     for row in events.itertuples(index=False):
         curve = by_id.get(str(row.object_id), pd.DataFrame())
@@ -641,12 +649,15 @@ def score_exact_copies(
         if not judgeable:
             continue
         n_judge += 1
-        if is_candidate_judgeable(curve, day, merger_mjd=float(row.merger_mjd)):
+        candidate = is_candidate_judgeable(curve, day, merger_mjd=float(row.merger_mjd))
+        if candidate:
             n_candidate += 1
         visible = light_curve_for_the_filter(curve, day)
         verdict = is_kilonova_candidate(visible, settings)
         if verdict.is_candidate:
             n_caught += 1
+            if candidate:
+                n_caught_candidate += 1
             continue
         failed_rules = []
         for name in ("fade", "color", "reddening"):
@@ -661,21 +672,65 @@ def score_exact_copies(
                 "dec_deg": float(row.dec_deg),
                 "ebv": float(row.ebv),
                 "failed_rules": failed_rules,
+                "candidate": candidate,
             }
         )
-    fraction = float(n_caught / n_judge) if n_judge else float("nan")
-    # No judgeable copy is not a pass. A NaN fraction used to hide that.
-    blocker = n_judge == 0 or fraction < 0.95
+    official = sanity_copy_verdict(n_judge, n_caught)
+    candidate_verdict = sanity_copy_verdict(n_candidate, n_caught_candidate)
     return {
         "n_copies": int(len(events)),
         "n_judgeable": n_judge,
         "n_judgeable_candidate": n_candidate,
         "n_caught_judgeable": n_caught,
-        "fraction_judgeable_caught": fraction,
-        "blocker": blocker,
+        "n_caught_candidate": n_caught_candidate,
+        "fraction_judgeable_caught": official["fraction"],
+        "fraction_candidate_caught": candidate_verdict["fraction"],
+        "blocker": official["blocker"],
+        "blocker_candidate": candidate_verdict["blocker"],
+        "official": official,
+        "candidate": candidate_verdict,
         "misses": misses,
         "day": day,
         "cuts": combo,
+    }
+
+
+def sanity_copy_verdict(n_judge: int, n_caught: int, *, target: int = 50) -> dict:
+    """Observed catch rate for one judgeable definition.
+
+    Fewer than ``target`` judgeable copies, including zero, is
+    ``sanity block UNTESTABLE, v1 not Done``. That is not a pass and it
+    is not printed as NaN. At or above the target, the fraction is an
+    observed catch rate. It is a blocker below 95 percent, which is
+    more than 2 misses in 50, or when a miss is later traced to a bug.
+    It is not a 95-percent-confidence claim.
+    """
+    if n_judge < target:
+        return {
+            "status": "untestable",
+            "phrase": "sanity block UNTESTABLE, v1 not Done",
+            "fraction": float("nan"),
+            "blocker": False,
+            "passed": False,
+            "n_judge": n_judge,
+            "n_caught": n_caught,
+        }
+    fraction = float(n_caught / n_judge)
+    blocker = fraction < 0.95
+    return {
+        "status": "observed",
+        "phrase": (
+            f"observed catch rate {n_caught} of {n_judge} "
+            f"({100.0 * fraction:.1f}%). "
+            "This is not a 95%-confidence claim. "
+            "A blocker is fewer than 95% caught, more than 2 misses in 50, "
+            "or any miss traced to a bug."
+        ),
+        "fraction": fraction,
+        "blocker": blocker,
+        "passed": not blocker,
+        "n_judge": n_judge,
+        "n_caught": n_caught,
     }
 
 
@@ -714,9 +769,7 @@ def exact_copy_rule_breakdown(
         if not judgeable:
             continue
         n_judge += 1
-        candidate = is_candidate_judgeable(
-            curve, day, merger_mjd=float(row.merger_mjd)
-        )
+        candidate = is_candidate_judgeable(curve, day, merger_mjd=float(row.merger_mjd))
         if candidate:
             n_candidate += 1
         visible = light_curve_for_the_filter(curve, day)
@@ -724,15 +777,16 @@ def exact_copy_rule_breakdown(
         reddening = _rule_word(verdict.reddening.passed)
         if reddening == "skipped":
             n_skipped += 1
+        color_text = _color_next_to_cut(visible)
         rows.append(
             {
                 "object_id": str(row.object_id),
                 "candidate": "yes" if candidate else "no",
                 "fade": _rule_word(verdict.fade.passed),
-                "g_minus_r": _rule_word(verdict.color.passed),
+                "g_minus_r": color_text,
                 "reddening": reddening,
                 "fade_text": verdict.fade.explanation,
-                "g_minus_r_text": verdict.color.explanation,
+                "g_minus_r_text": color_text,
                 "reddening_text": verdict.reddening.explanation,
             }
         )
@@ -757,6 +811,47 @@ def exact_copy_rule_breakdown(
     }
 
 
+def _color_next_to_cut(visible: pd.DataFrame) -> str:
+    """g minus r at r peak + 1 day, or why that color is not usable."""
+    peak = peak_time_days(visible, "r")
+    cut = THRESHOLDS.redder_than_g_minus_r
+    limit = THRESHOLDS.max_color_interpolation_gap_days
+    if peak is None:
+        return "no usable g-r: no r-band peak"
+    when = float(peak) + THRESHOLDS.color_days_after_peak
+    color = g_minus_r_at_time(visible, when, max_gap_days=limit)
+    if color.g_minus_r is not None:
+        flag = ""
+        if color.g_minus_r <= 0.0:
+            flag = " AT OR BELOW 0.0: Science Lead rechecks the 0.0-0.6 grid."
+        return f"g-r {color.g_minus_r:.2f} next to cut {cut:.2f}.{flag}"
+    gap = _widest_bracket_gap(visible, when)
+    if gap is not None and gap > limit:
+        return f"no usable g-r: gap {gap:.2f} d > {limit:.1f} d"
+    return f"no usable g-r: {color.explanation}"
+
+
+def _widest_bracket_gap(visible: pd.DataFrame, when: float) -> float | None:
+    """Largest gap the color would have to cross, in days."""
+    gaps: list[float] = []
+    for band in ("g", "r"):
+        times = sorted(
+            float(value)
+            for value in visible.loc[visible["filter"].astype(str) == band, "time_days"]
+        )
+        if len(times) < 2 or when < times[0] or when > times[-1]:
+            continue
+        earlier = times[0]
+        for time_days in times:
+            if time_days > when:
+                gaps.append(time_days - earlier)
+                break
+            earlier = time_days
+    if not gaps:
+        return None
+    return max(gaps)
+
+
 def format_exact_copy_breakdown(report: dict) -> str:
     """Plain-language breakdown. This is a finding, not a new score."""
     lines = [
@@ -766,6 +861,8 @@ def format_exact_copy_breakdown(report: dict) -> str:
         "Candidate (b) also needs a usable g minus r at r-peak + 1 day "
         "with the 1.0-day gap limit. (b) is not official. "
         "It does not replace (a).",
+        "Light curves use the diffusion wrapper (arnett-factor-2) on "
+        "redback 1.20.0. The package itself is not edited.",
         "Cuts are the placeholders in config.py, not a cut picked from the grid.",
         f"Day {report['day']:g}. Reddening window {report['window_days']:g} days, "
         f"minimum color gap {report['gap_days']:g} days.",
@@ -786,7 +883,7 @@ def format_exact_copy_breakdown(report: dict) -> str:
         lines.append(
             f"- {row['object_id']}: definition (b) {row['candidate']}, "
             f"fade {row['fade']}, "
-            f"g-r cut {row['g_minus_r']}, reddening {row['reddening']}."
+            f"{row['g_minus_r']}, reddening {row['reddening']}."
         )
         lines.append(f"  Fade: {row['fade_text']}")
         lines.append(f"  g-r: {row['g_minus_r_text']}")
@@ -867,6 +964,7 @@ def format_test_score(
         "using the 1.0-day interpolation limit. (b) is not official. "
         "It does not replace (a)."
     )
+    lines.append(EARLY_GAP_MODEL_LIMIT)
     lines.append("")
     lines.append(
         "Recall among judgeable fakes describes the filter. "
@@ -928,6 +1026,7 @@ def summarize_grid(
         "Judgeable (b) also needs a usable g minus r at r-peak + 1 day, "
         "using the 1.0-day interpolation limit. (b) is not official. "
         "It does not replace (a).",
+        EARLY_GAP_MODEL_LIMIT,
         "",
         TNS_STATUS_LINE,
         "",
@@ -1093,11 +1192,10 @@ def run_tuning_grid(
 
 
 def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
-    """Lead with the investigation when any fake is caught but not judgeable.
+    """List every caught-but-not-judgeable case at days 3, 5, and 7.
 
-    The check covers days 3, 5, and 7. A hit on day 7 is still reported.
-    That case is a rule mismatch, not a bug in the day-D cutoff, and the
-    official judgeable rule is left as it is.
+    The list does not invalidate the run. The team decides what a
+    nonzero count means. The official judgeable rule is not changed.
     """
     headline = [
         row
@@ -1108,36 +1206,44 @@ def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
     ]
     if not headline:
         return ""
-    worst = max(headline, key=lambda row: int(row["n_caught_not_judgeable"]))
-    population = worst["population"]
-    prepared_by_day, curves = prepared_for_examples[population]
-    day = float(worst["day"])
-    prepared = prepared_by_day[day]
-    combo = {
-        "redder_than_g_minus_r": worst["redder_than_g_minus_r"],
-        "min_g_minus_r_rise": worst["min_g_minus_r_rise"],
-        "reddening_window_days": worst["reddening_window_days"],
-        "min_color_separation_days": worst["min_color_separation_days"],
-    }
-    examples = examples_caught_but_not_judgeable(prepared, curves, combo, day=day)
     lines = [
         "# Caught but not judgeable",
         "",
-        f"{worst['population']} day {worst['day']}: "
-        f"{worst['n_caught_not_judgeable']} fakes were flagged and were not judgeable.",
-        "The filter can do this when g and r fall on different nights "
-        "(the color rule still interpolates) or when two points in one band "
-        "are closer than 0.5 days (the fade rule can still fit them). "
-        "The catch rate still counts them. The recall among judgeable fakes does not.",
+        "Every cell below is a day-3, day-5, or day-7 case where the filter "
+        "flagged a fake the official judgeable rule did not accept. "
+        "This list does not invalidate the run. The team decides that.",
         "",
     ]
-    for example in examples:
-        lines.append(
-            f"- {example['object_id']} at {example['distance_mpc']:.1f} Mpc, "
-            f"{example['n_rows_by_day']} rows by that day, "
-            f"reddening skipped: {example['reddening_skipped']}."
+    for row in sorted(
+        headline, key=lambda item: (item["population"], float(item["day"]))
+    ):
+        population = row["population"]
+        prepared_by_day, curves = prepared_for_examples[population]
+        day = float(row["day"])
+        prepared = prepared_by_day[day]
+        combo = {
+            "redder_than_g_minus_r": row["redder_than_g_minus_r"],
+            "min_g_minus_r_rise": row["min_g_minus_r_rise"],
+            "reddening_window_days": row["reddening_window_days"],
+            "min_color_separation_days": row["min_color_separation_days"],
+        }
+        examples = examples_caught_but_not_judgeable(
+            prepared, curves, combo, day=day, limit=int(row["n_caught_not_judgeable"])
         )
-    lines.append("")
+        lines.append(
+            f"{population} day {day:g}, g-r cut {combo['redder_than_g_minus_r']}, "
+            f"rise {combo['min_g_minus_r_rise']}, "
+            f"window {combo['reddening_window_days']} days, "
+            f"gap {combo['min_color_separation_days']} days: "
+            f"{row['n_caught_not_judgeable']} caught and not judgeable."
+        )
+        for example in examples:
+            lines.append(
+                f"- {example['object_id']} at {example['distance_mpc']:.1f} Mpc, "
+                f"{example['n_rows_by_day']} rows by that day, "
+                f"reddening skipped: {example['reddening_skipped']}."
+            )
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -1203,27 +1309,40 @@ def _power_clause(value: float) -> str:
     return f" Chance the Wilson lower bound clears 70% recall: {shown}."
 
 
+def _sanity_line(label: str, verdict: dict, n_copies: int) -> str:
+    """One sentence for definition (a) or (b). Never prints a bare NaN."""
+    if verdict["status"] == "untestable":
+        return (
+            f"Judgeable ({label}): {verdict['phrase']}. "
+            f"{verdict['n_judge']} judgeable, {verdict['n_caught']} caught, "
+            f"out of {n_copies} copies."
+        )
+    prefix = "SIGN-OFF BLOCKER. " if verdict["blocker"] else ""
+    return f"{prefix}Judgeable ({label}): {verdict['phrase']} Out of {n_copies} copies."
+
+
 def _copy_lines(copies: dict) -> list[str]:
-    fraction = copies["fraction_judgeable_caught"]
-    if fraction != fraction:
-        fraction_text = "no judgeable copies"
-    else:
-        fraction_text = f"{100.0 * fraction:.1f}% of judgeable copies caught"
-    blocker = "SIGN-OFF BLOCKER. " if copies["blocker"] else ""
+    official = copies.get("official") or sanity_copy_verdict(
+        int(copies["n_judgeable"]), int(copies["n_caught_judgeable"])
+    )
+    candidate = copies.get("candidate") or sanity_copy_verdict(
+        int(copies.get("n_judgeable_candidate", 0)),
+        int(copies.get("n_caught_candidate", 0)),
+    )
     lines = [
         "",
         "## Exact AT2017gfo copies",
         "",
         "These copies are not in the recall or the catch rate. "
-        "The fraction below uses the placeholder cuts in config.py, "
-        "not a cut picked from the grid.",
+        "The fractions below use the placeholder cuts in config.py, "
+        "not a cut picked from the grid. "
+        "Definition (a) is official. Definition (b) not adopted. "
+        "12(16) is proposed: keep drawing until 50 are judgeable, cap 4,000.",
         "",
-        f"{blocker}{copies['n_caught_judgeable']} of {copies['n_judgeable']} "
-        f"judgeable copies caught ({fraction_text}), "
-        f"out of {copies['n_copies']} copies.",
-        f"Judgeable (a, official): {copies['n_judgeable']}. "
-        "Judgeable (b, candidate, not adopted): "
-        f"{copies.get('n_judgeable_candidate', 'not counted')}.",
+        _sanity_line("a, official", official, int(copies["n_copies"])),
+        _sanity_line(
+            "b, candidate, not adopted", candidate, int(copies["n_copies"])
+        ),
     ]
     if copies["misses"]:
         lines.append("")

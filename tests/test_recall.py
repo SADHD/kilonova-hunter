@@ -626,6 +626,7 @@ def test_cache_key_includes_depths_redback_and_the_dust_map() -> None:
         status="ready",
     )
     assert manifest["redback_version"] == _redback_version()
+    assert manifest["diffusion_fix"] == "arnett-factor-2"
     assert manifest["dust_map"].startswith("SFD x 0.86")
     assert manifest["survey"]["error_floor_mag"] == survey.error_floor_mag
     assert "g" in manifest["survey"]["limits"]
@@ -688,7 +689,25 @@ def test_realistic_temperature_floors_stay_at_the_redback_defaults() -> None:
     event = replace(at2017gfo_like_event(), kind="population", ebv=0.0)
     variant = not_counted_realistic_event(event)
     assert variant.tf_dynamical == NOT_COUNTED_TF_DYNAMICAL_K == 3745.0
-    assert variant.tf_wind == NOT_COUNTED_TF_WIND_K == 1308.0
+    assert variant.tf_wind == NOT_COUNTED_TF_WIND_K == 674.0
     assert event.tf_dynamical == 2500.0
     assert event.tf_wind == 5000.0
     assert "NOT-COUNTED" in (not_counted_realistic_event.__doc__ or "")
+    assert "this project's assumption" in (PopulationSettings.__doc__ or "")
+
+
+def test_mean_first_visit_wait_matches_the_length_weighted_gap() -> None:
+    """A random instant in a running survey waits 14/9 days, not 1.5.
+
+    Gaps are uniform from 2 to 4 days. The mean forward wait in a
+    stationary sequence is E[gap^2] / (2 E[gap]) = 14/9 days.
+    """
+    from kilonova_hunter.recall import _wfd_pair_starts
+
+    survey = SurveySettings(cadence="wfd", survey_length_days=8.0)
+    waits = []
+    for seed in range(1500):
+        starts = _wfd_pair_starts(np.random.default_rng(seed), survey)
+        after = starts[starts >= 0.0]
+        waits.append(float(after[0]))
+    assert float(np.mean(waits)) == pytest.approx(14.0 / 9.0, abs=0.05)

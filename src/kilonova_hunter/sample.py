@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kilonova_hunter.judge import JUDGE_DAYS, is_judgeable
+from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
 from kilonova_hunter.recall import (
     MODEL_ERROR_ABORT_FRACTION,
     TUNING_SEED,
@@ -46,6 +46,7 @@ from kilonova_hunter.recall import (
     sample_viewing_angle_deg,
     simulate_event,
 )
+from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
 from kilonova_hunter.sky import (
     DustSource,
     draw_footprint_positions,
@@ -56,10 +57,13 @@ from kilonova_hunter.sky import (
     sample_luminosity_distances,
 )
 from kilonova_hunter.villar import (
+    EXACT_BATCH_SIZE,
+    EXACT_CAP,
     EXACT_COUNT,
     EXACT_DISTANCE_MPC,
     EXACT_KIND,
     EXACT_SEED,
+    EXACT_TARGET_JUDGEABLE,
     LIKE_KIND,
     VillarEvent,
     VillarSpread,
@@ -74,7 +78,8 @@ POPULATIONS = (LIKE_KIND, REALISTIC)
 SPLITS = ("tuning", "test")
 
 # Bump this when a cached light curve would no longer match the code.
-CACHE_VERSION = 1
+# 2: the diffusion wrapper is on. A version-1 cache is pre-fix.
+CACHE_VERSION = 2
 
 # Parent entropy shared by the tuning stream and the test stream.
 PARENT_SEED = TUNING_SEED
@@ -350,15 +355,19 @@ def draw_exact_copies(
     dust: DustSource,
     count: int = EXACT_COUNT,
     seed: int = EXACT_SEED,
+    *,
+    start_index: int = 0,
+    batch_index: int = 0,
 ) -> tuple[list[VillarEvent], list[int]]:
     """``count`` copies of the Table 2 center, at 40 Mpc.
 
     Start times and sky positions are random. The ejecta are not.
-    The seed is ``EXACT_SEED``, not the tuning or test seed, so these
-    copies do not consume either population stream. They are not part
-    of a recall denominator.
+    The seed is ``EXACT_SEED`` plus the batch index, not the tuning or
+    test seed, so these copies do not consume either population stream.
+    They are not part of a recall denominator. A later batch uses a
+    later ``batch_index`` so it does not repeat the first batch.
     """
-    rng = np.random.default_rng(np.random.SeedSequence([seed]))
+    rng = np.random.default_rng(np.random.SeedSequence([seed, batch_index]))
     redshift = redshift_at_luminosity_distance(EXACT_DISTANCE_MPC)
     ra, dec, galactic_b = draw_footprint_positions(rng, count)
     blue, purple, red = exact_components()
@@ -368,9 +377,10 @@ def draw_exact_copies(
     events: list[VillarEvent] = []
     seeds: list[int] = []
     for index in range(count):
+        number = start_index + index
         events.append(
             VillarEvent(
-                object_id=f"{EXACT_KIND}-{index:03d}",
+                object_id=f"{EXACT_KIND}-{number:05d}",
                 kind=EXACT_KIND,
                 distance_mpc=EXACT_DISTANCE_MPC,
                 redshift=redshift,
@@ -385,7 +395,7 @@ def draw_exact_copies(
                 red=red,
             )
         )
-        state = np.random.SeedSequence([seed, index, 3]).generate_state(
+        state = np.random.SeedSequence([seed, batch_index, index, 3]).generate_state(
             1, dtype=np.uint32
         )
         seeds.append(int(state[0]))
@@ -459,6 +469,12 @@ def _event_record(event, *, error_reason: str | None, curve: pd.DataFrame) -> di
             False if failed else is_judgeable(curve, day, merger_mjd=event.merger_mjd)
         )
         row[f"judgeable_day{int(day)}"] = int(flag)
+        candidate = (
+            False
+            if failed
+            else is_candidate_judgeable(curve, day, merger_mjd=event.merger_mjd)
+        )
+        row[f"judgeable_candidate_day{int(day)}"] = int(candidate)
     return row
 
 
@@ -572,6 +588,7 @@ def _same_setup(
         and manifest.get("dust_mode") == dust.mode
         and manifest.get("dust_map") == _recorded_dust_map(dust)
         and manifest.get("redback_version") == _redback_version()
+        and manifest.get("diffusion_fix") == DIFFUSION_FIX_ID
         and manifest.get("survey") == _survey_dict(survey)
     )
 
@@ -769,49 +786,82 @@ def simulate_exact_copies(
     dust: DustSource | None = None,
     cache_dir: Path | str = Path("data") / "recall" / "cache",
     workers: int = 1,
-    count: int = EXACT_COUNT,
+    count: int | None = None,
+    target_judgeable: int = EXACT_TARGET_JUDGEABLE,
+    cap: int = EXACT_CAP,
+    batch_size: int = EXACT_BATCH_SIZE,
 ) -> SampleResult:
-    """Simulate the exact AT2017gfo copies. They are not a recall set."""
+    """Simulate exact AT2017gfo copies. They are not a recall set.
+
+    The default follows Decision Log 12(16), which is proposed and
+    not yet adopted. Batches are drawn at 40 Mpc, with random
+    cadence dates and random positions, until at least
+    ``target_judgeable`` copies are judgeable at day 3 under the
+    official definition, or ``cap`` copies have been drawn. Pass
+    ``count`` to draw a fixed number instead. That fixed draw is for
+    tests. The report uses the default.
+    """
     sky = survey if survey is not None else evaluation_survey()
     dust_source = dust if dust is not None else open_dust_source()
     folder = Path(cache_dir) / EXACT_KIND / "copies"
     loaded = _read_cache(folder)
-    if (
-        loaded is not None
-        and loaded[0].get("cache_version") == CACHE_VERSION
-        and loaded[0].get("dust_mode") == dust_source.mode
-        and loaded[0].get("dust_map") == _recorded_dust_map(dust_source)
-        and loaded[0].get("redback_version") == _redback_version()
-        and loaded[0].get("survey") == _survey_dict(sky)
-        and int(loaded[0].get("n_simulated", 0)) == count
+    if loaded is not None and _exact_cache_matches(
+        loaded[0],
+        dust=dust_source,
+        survey=sky,
+        count=count,
+        target_judgeable=target_judgeable,
+        cap=cap,
     ):
-        _manifest_loaded, events, curves = loaded
+        manifest, events, curves = loaded
         return _result_from_frames(
             population=EXACT_KIND,
             split="copies",
-            status="ready",
+            status=str(manifest.get("status", "ready")),
             events=events,
             curves=curves,
             dust=dust_source,
             cache_dir=folder,
         )
-    events_list, seeds = draw_exact_copies(dust_source, count=count)
-    jobs = [
-        {"population": LIKE_KIND, "event": event, "survey": sky, "seed": seed}
-        for event, seed in zip(events_list, seeds, strict=True)
-    ]
-    simulated = _run_jobs(jobs, workers)
-    by_id = {item[0]: item for item in simulated}
-    rows = []
-    frames = []
-    for event in events_list:
-        object_id, curve, error_reason = by_id[event.object_id]
-        rows.append(_event_record(event, error_reason=error_reason, curve=curve))
-        framed = _curve_frame(object_id, curve)
-        if framed is not None:
-            frames.append(framed)
+    rows: list[dict] = []
+    frames: list[pd.DataFrame] = []
+    drawn = 0
+    batch_index = 0
+    goal = count if count is not None else cap
+    while drawn < goal:
+        if count is None and _flag_sum_rows(rows, "judgeable_day3") >= target_judgeable:
+            break
+        this_batch = batch_size if count is None else count
+        this_batch = min(this_batch, goal - drawn)
+        events_list, seeds = draw_exact_copies(
+            dust_source,
+            count=this_batch,
+            start_index=drawn,
+            batch_index=batch_index,
+        )
+        jobs = [
+            {"population": LIKE_KIND, "event": event, "survey": sky, "seed": seed}
+            for event, seed in zip(events_list, seeds, strict=True)
+        ]
+        simulated = _run_jobs(jobs, workers)
+        by_id = {item[0]: item for item in simulated}
+        for event in events_list:
+            object_id, curve, error_reason = by_id[event.object_id]
+            rows.append(_event_record(event, error_reason=error_reason, curve=curve))
+            framed = _curve_frame(object_id, curve)
+            if framed is not None:
+                frames.append(framed)
+        drawn += this_batch
+        batch_index += 1
+        if count is not None:
+            break
     events = pd.DataFrame(rows)
     curves = pd.concat(frames, ignore_index=True) if frames else _empty_curves()
+    n_judge = _flag_sum(events, "judgeable_day3")
+    if count is None and n_judge < target_judgeable:
+        status = "untestable"
+    else:
+        status = "ready"
     manifest = {
         "cache_version": CACHE_VERSION,
         "population": EXACT_KIND,
@@ -820,21 +870,86 @@ def simulate_exact_copies(
         "dust_map": _recorded_dust_map(dust_source),
         "dust_reason": dust_source.reason,
         "redback_version": _redback_version(),
+        "diffusion_fix": DIFFUSION_FIX_ID,
         "survey": _survey_dict(sky),
         "n_simulated": len(events),
+        "n_judgeable_day3": n_judge,
         "seed": EXACT_SEED,
-        "status": "ready",
+        "target_judgeable": None if count is not None else target_judgeable,
+        "cap": None if count is not None else cap,
+        "fixed_count": count,
+        "status": status,
     }
     _write_cache(folder, manifest, events, curves)
     return _result_from_frames(
         population=EXACT_KIND,
         split="copies",
-        status="ready",
+        status=status,
         events=events,
         curves=curves,
         dust=dust_source,
         cache_dir=folder,
     )
+
+
+def _flag_sum_rows(rows: list[dict], column: str) -> int:
+    return sum(int(row.get(column, 0)) for row in rows)
+
+
+def _exact_cache_matches(
+    manifest: dict,
+    *,
+    dust: DustSource,
+    survey: SurveySettings,
+    count: int | None,
+    target_judgeable: int,
+    cap: int,
+) -> bool:
+    """True when a saved copy cache is the current code and the same draw."""
+    if manifest.get("cache_version") != CACHE_VERSION:
+        return False
+    if manifest.get("diffusion_fix") != DIFFUSION_FIX_ID:
+        return False
+    if manifest.get("dust_mode") != dust.mode:
+        return False
+    if manifest.get("dust_map") != _recorded_dust_map(dust):
+        return False
+    if manifest.get("redback_version") != _redback_version():
+        return False
+    if manifest.get("survey") != _survey_dict(survey):
+        return False
+    if count is not None:
+        return int(manifest.get("n_simulated", 0)) == count
+    return (
+        manifest.get("target_judgeable") == target_judgeable
+        and manifest.get("cap") == cap
+        and manifest.get("fixed_count") is None
+    )
+
+
+def cache_refusal_reason(manifest: dict) -> str | None:
+    """Why a cache must not be scored or reused, or None when it may.
+
+    A cache from before the diffusion wrapper has no ``diffusion_fix``
+    marker. That cache is refused. An unfinished run (``continue`` or
+    ``running``) is refused too.
+    """
+    if manifest.get("cache_version") != CACHE_VERSION:
+        return (
+            f"cache_version is {manifest.get('cache_version')!r}, "
+            f"and the current code is {CACHE_VERSION}."
+        )
+    if manifest.get("diffusion_fix") != DIFFUSION_FIX_ID:
+        return (
+            "the cache has no diffusion-fix marker "
+            f"{DIFFUSION_FIX_ID!r}. A pre-fix cache is refused."
+        )
+    status = str(manifest.get("status", ""))
+    if status in {"continue", "running"}:
+        return f"the cache status is {status!r}. Finish the simulation first."
+    if status not in {"ready", "underpowered", "untestable"}:
+        return f"the cache status is {status!r}, which is not a finished run."
+    return None
 
 
 def _flag_sum(events: pd.DataFrame, column: str) -> int:
@@ -878,6 +993,7 @@ def _manifest(
         "dust_map": _recorded_dust_map(dust),
         "dust_reason": dust.reason,
         "redback_version": _redback_version(),
+        "diffusion_fix": DIFFUSION_FIX_ID,
         "survey": _survey_dict(survey),
         "sample_size": asdict(settings),
         "completed_batches": completed,
