@@ -7,6 +7,7 @@ import pytest
 from kilonova_hunter.config import THRESHOLDS
 from kilonova_hunter.grid import (
     PreparedFake,
+    _combo_sentence,
     _worst_not_judgeable,
     chance_wilson_lower_at_least,
     fast_verdict_matches_filter,
@@ -128,6 +129,30 @@ def test_sample_size_defaults_and_the_three_stopping_outcomes() -> None:
     # The last batch shrinks so the cap is not crossed.
     assert next_batch_size(19_700, settings) == 300
     assert next_batch_size(20_000, settings) == 0
+
+
+def test_tiny_power_prints_as_about_zero() -> None:
+    """A chance of 3e-80 is printed as about 0. A real chance keeps its digits."""
+    row = {
+        "recall_judgeable": 0.10,
+        "recall_low": 0.06,
+        "recall_high": 0.16,
+        "catch_rate": 0.001,
+        "catch_low": 0.0,
+        "catch_high": 0.01,
+        "judgeable_fraction": 0.01,
+        "n_reddening_skipped": 0,
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+        "power_at_70": 3e-80,
+    }
+    text = _combo_sentence(row)
+    assert "about 0" in text
+    assert "3e-80" not in text
+    row["power_at_70"] = 0.42
+    assert "0.42" in _combo_sentence(row)
 
 
 def test_power_is_one_when_every_draw_would_clear_the_bar() -> None:
