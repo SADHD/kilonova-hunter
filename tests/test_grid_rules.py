@@ -15,6 +15,7 @@ from kilonova_hunter.grid import (
     load_settings,
     pick_by_recall,
     pick_with_flag_limit,
+    score_exact_copies,
     score_prepared,
 )
 from kilonova_hunter.inject import simulate_kilonova_light_curve
@@ -291,6 +292,40 @@ def test_caught_but_not_judgeable_check_includes_day_7() -> None:
     assert "day 7" in text
     assert "realistic-tuning-08304" in text
     assert "SIGN-OFF" not in text
+
+
+def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
+    """No judgeable copy is a blocker, not a blank that can be signed off."""
+    from kilonova_hunter.grid import _copy_lines
+
+    events = pd.DataFrame(
+        {
+            "object_id": ["at2017gfo-exact-000"],
+            "merger_mjd": [60000.0],
+            "ra_deg": [10.0],
+            "dec_deg": [-20.0],
+            "ebv": [0.01],
+        }
+    )
+    curves = pd.DataFrame(
+        {
+            "object_id": ["at2017gfo-exact-000"],
+            "time_days": [1.0],
+            "filter": ["r"],
+            "magnitude": [18.0],
+            "magnitude_error": [0.05],
+        }
+    )
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    result = score_exact_copies(events, curves, combo)
+    assert result["n_judgeable"] == 0
+    assert result["blocker"] is True
+    assert "SIGN-OFF BLOCKER" in "\n".join(_copy_lines(result))
 
 
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
