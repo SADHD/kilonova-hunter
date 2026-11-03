@@ -70,3 +70,10 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      - name: Rerun the MOSFiT checks against the committed output
+        # Each checks/mosfit script that has a saved .out is run again.
+        # redback and bilby log lines are ignored because they include a
+        # timestamp. A number may move by float noise. Any other change
+        # fails the job.
+        run: uv run python scripts/diff_mosfit_outputs.py

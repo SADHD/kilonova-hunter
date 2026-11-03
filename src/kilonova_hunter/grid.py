@@ -292,6 +292,10 @@ def caught_not_judgeable_blocks(rows: list[dict]) -> bool:
 
     Rule 5 requires that count to be 0. A nonzero count blocks sign-off
     the same way a sanity FAIL does.
+
+    Pending Science Lead: this currently looks at every scored cell,
+    all 72 cuts and the distance bins, not only a chosen cut. No cut
+    is chosen here. Leave that scope until the ruling.
     """
     return any(int(row.get("n_caught_not_judgeable", 0)) > 0 for row in rows)
 
@@ -568,10 +572,10 @@ def recall_with_bluer_color(
 
     Subtracting ``offset`` magnitudes from g-r is the sensitivity for
     the measured model-minus-AT2017gfo color gap. The default is +0.4
-    mag. The epoch values are +0.37 at 1.5 d, +0.47 at 2 d, and +0.41
+    mag. The epoch values are +0.37 at 1.5 d, +0.47 at 2 d, and +0.42
     at 3 d, so the offset sits in 0.3 to 0.47. A constant shift does
-    not change the reddening rise. This is a reporting hook. The tuning
-    grid does not call it.
+    not change the reddening rise. The tuning grid prints this shift.
+    It is not used to pick a cut.
     """
     from dataclasses import replace
 

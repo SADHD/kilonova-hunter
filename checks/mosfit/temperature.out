@@ -1,3 +1,7 @@
+17:16 redback WARNING : No module named 'lalsimulation'
+17:16 redback WARNING : lalsimulation is not installed. Some EOS based models will not work. Please use bilby eos or pass your own EOS generation class to the model
+17:16 bilby INFO    : Running bilby version: 2.8.2
+17:16 redback INFO    : Running redback version: 1.20.0
  t    T_blue T_purp T_red | L-weighted T  | Waxman T_eff | R_blue/Waxman R
  0.5    8649   6701   5041 |   7970 (area-avg) |  10266       | 0.93
  0.8    6932   5684   4254 |   6439 (area-avg) |   7093       | 0.92
