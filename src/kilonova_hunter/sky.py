@@ -292,6 +292,16 @@ def extinction_for_bands(ebv: float, bands: np.ndarray) -> np.ndarray:
     return np.array([by_band[str(band)] for band in bands], dtype=float)
 
 
+def dust_map_label() -> str:
+    """The dust correction a cache must name before the test set is scored.
+
+    SFD times 0.86 is Schlafly and Finkbeiner 2011. Magnitudes use
+    Fitzpatrick 1999 at R_V = 3.1. The text is exact, so a cache from
+    the old exponential draw cannot pass as this map.
+    """
+    return "SFD x 0.86, Fitzpatrick 1999, R_V = 3.1"
+
+
 @dataclass(frozen=True)
 class DustSource:
     """Where E(B-V) came from for this run.
