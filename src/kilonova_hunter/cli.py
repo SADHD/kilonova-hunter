@@ -386,12 +386,6 @@ def _run_score_test(args) -> None:
         _fail(f"--cuts is missing {', '.join(missing)}.")
     combo = {name: float(cuts[name]) for name in needed}
     cache = Path(args.cache)
-    marker = _score_once_marker(cache)
-    if marker.is_file():
-        _fail(
-            f"{marker} already exists. The test set was scored once. "
-            "A different --output does not allow another score."
-        )
     expected_map = dust_map_label()
     loaded_sets = []
     for population in (LIKE_KIND, REALISTIC):
@@ -432,10 +426,10 @@ def _run_score_test(args) -> None:
                 f"({expected_n!r} vs {len(events)} rows)."
             )
         loaded_sets.append((population, manifest, events, curves))
-    # Claim the once-only marker before any scoring. A crash during the
-    # score still leaves the marker, so a second run does not score again.
-    # Two processes cannot both create it: the create is exclusive.
-    _claim_score_once_marker(marker, combo)
+    # Claim the once-only marker before any scoring. The key is the test
+    # set itself, stored outside the cache, so a fresh --cache cannot
+    # reset it. The create is exclusive. A crash still leaves the claim.
+    _claim_score_once_marker(loaded_sets, combo)
     by_population = {}
     for population, manifest, events, curves in loaded_sets:
         by_population[population] = score_with_frozen_cuts(
@@ -455,37 +449,113 @@ def _run_score_test(args) -> None:
     print(text)
 
 
-def _score_once_marker(cache: Path) -> Path:
-    """A file beside the test caches. It outlives the --output directory."""
-    return Path(cache) / "test_scored_once.json"
+_TEST_SET_SPEC_KEYS = (
+    "parent_seed",
+    "seed",
+    "survey",
+    "sample_size",
+    "cache_version",
+    "diffusion_fix",
+    "dust_mode",
+    "dust_map",
+    "redback_version",
+)
 
 
-def _claim_score_once_marker(path: Path, combo: dict[str, float]) -> None:
-    """Create the marker with O_CREAT|O_EXCL, or stop if it already exists.
+def test_set_scored_path() -> Path:
+    """Committed ledger of scored test sets. Not inside the cache folder."""
+    import os
 
-    The file is created before scoring. It is not removed if scoring
-    raises, and it is not rewritten when the cache changes.
-    """
+    override = os.environ.get("KILONOVA_TEST_SET_SCORED")
+    if override:
+        return Path(override)
+    return Path("results") / "test_set_scored.json"
+
+
+def test_set_claim_dir() -> Path:
+    """Exclusive claim files, one per test-set hash, beside the ledger."""
+    return test_set_scored_path().parent / "test_set_claims"
+
+
+def test_set_sha256(loaded_sets: list) -> str:
+    """Hash of seeds, settings, and sorted fake ids. The cache path is not in it."""
     import hashlib
+    import json
+
+    parts = []
+    for population, manifest, events, _curves in loaded_sets:
+        if events is not None and "object_id" in events.columns:
+            object_ids = sorted(str(item) for item in events["object_id"].tolist())
+        else:
+            object_ids = []
+        spec = {key: manifest.get(key) for key in _TEST_SET_SPEC_KEYS}
+        parts.append({"population": population, "spec": spec, "object_ids": object_ids})
+    raw = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _ledger_hashes() -> set[str]:
+    import json
+
+    path = test_set_scored_path()
+    if not path.is_file():
+        return set()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return set(payload.get("sets", {}))
+
+
+def _record_scored_test_set(test_hash: str, combo: dict[str, float]) -> None:
+    import hashlib
+    import json
+
+    path = test_set_scored_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        payload = {"sets": {}}
+    cuts = json.dumps(combo, sort_keys=True, separators=(",", ":"))
+    payload.setdefault("sets", {})[test_hash] = {
+        "cuts_sha256": hashlib.sha256(cuts.encode("utf-8")).hexdigest(),
+        "cuts": combo,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _claim_score_once_marker(loaded_sets: list, combo: dict[str, float]) -> None:
+    """Create an exclusive claim for this test set before scoring.
+
+    The ledger lives at ``results/test_set_scored.json``, not in the
+    cache. Copying the cache, or pointing ``--cache`` at a fresh folder
+    with the same fakes, does not clear it. A different test set, with
+    different seeds, settings, or fake ids, gets its own claim.
+    """
     import json
     import os
 
-    payload = json.dumps(combo, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    body = json.dumps({"cuts_sha256": digest, "cuts": combo}, indent=2) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    test_hash = test_set_sha256(loaded_sets)
+    if test_hash in _ledger_hashes():
+        _fail(
+            f"Test set {test_hash[:12]} was scored once "
+            f"({test_set_scored_path()}). "
+            "A fresh --cache does not allow another score."
+        )
+    claim = test_set_claim_dir() / test_hash
+    claim.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
-        descriptor = os.open(path, flags, 0o644)
+        descriptor = os.open(claim, flags, 0o644)
     except FileExistsError:
         _fail(
-            f"{path} already exists. The test set was scored once. "
-            "A different --output does not allow another score."
+            f"Test set {test_hash[:12]} was scored once. "
+            "A different --output or --cache does not allow another score."
         )
+    body = json.dumps({"test_set_sha256": test_hash, "cuts": combo}, indent=2) + "\n"
     try:
         os.write(descriptor, body.encode("utf-8"))
     finally:
         os.close(descriptor)
+    _record_scored_test_set(test_hash, combo)
 
 
 def _run_grid(args) -> None:
@@ -518,11 +588,12 @@ def _run_grid(args) -> None:
     )
     print(result.text)
     if result.sign_off_blocker:
-        label = (result.copy_status or "blocker").upper()
-        print(
-            f"Sign-off blocker: the exact-copy verdict is {label}.",
-            file=sys.stderr,
-        )
+        if result.block_reasons:
+            detail = "; ".join(result.block_reasons)
+        else:
+            label = (result.copy_status or "blocker").upper()
+            detail = f"the exact-copy verdict is {label}"
+        print(f"Sign-off blocker: {detail}.", file=sys.stderr)
         raise SystemExit(2)
 
 

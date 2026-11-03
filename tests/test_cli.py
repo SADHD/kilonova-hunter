@@ -475,13 +475,16 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
 
 
 def test_score_test_rejects_a_continue_cache_and_a_second_output(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An unfinished cache is refused, and a second output directory is too."""
     from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
     from kilonova_hunter.sample import CACHE_VERSION
     from kilonova_hunter.sky import dust_map_label
 
+    monkeypatch.setenv(
+        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
+    )
     output = tmp_path / "results"
     output.mkdir()
     other = tmp_path / "other-results"
@@ -542,7 +545,7 @@ def test_score_test_rejects_a_continue_cache_and_a_second_output(
             str(cache),
         ]
     )
-    assert (cache / "test_scored_once.json").is_file()
+    assert (tmp_path / "test_set_scored.json").is_file()
     with pytest.raises(SystemExit) as caught:
         main(
             [
@@ -607,6 +610,9 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The marker is created before scoring. A crash still blocks a second run."""
+    monkeypatch.setenv(
+        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
+    )
     output = tmp_path / "results"
     output.mkdir()
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
@@ -630,8 +636,9 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
                 str(cache),
             ]
         )
-    marker = cache / "test_scored_once.json"
+    marker = tmp_path / "test_set_scored.json"
     assert marker.is_file()
+    assert any((tmp_path / "test_set_claims").iterdir())
     assert not (output / "test_score.md").exists()
     # A changed cache does not clear the marker.
     manifest = cache / "2017-like" / "test" / "manifest.json"
@@ -658,10 +665,15 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
     assert marker.is_file()
 
 
-def test_two_concurrent_score_runs_let_one_through(tmp_path: Path) -> None:
+def test_two_concurrent_score_runs_let_one_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """O_EXCL lets one of two simultaneous scores create the marker."""
     import multiprocessing
 
+    monkeypatch.setenv(
+        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
+    )
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
     cache = tmp_path / "cache"
     _ready_test_cache(cache)
@@ -683,9 +695,75 @@ def test_two_concurrent_score_runs_let_one_through(tmp_path: Path) -> None:
     with context.Pool(2) as pool:
         codes = pool.map(_score_argv, [argv_a, argv_b])
     assert sorted(codes) == [0, 1]
-    assert (cache / "test_scored_once.json").is_file()
+    assert (tmp_path / "test_set_scored.json").is_file()
     reports = [first / "test_score.md", second / "test_score.md"]
     assert sum(path.is_file() for path in reports) == 1
+
+
+def test_a_fresh_cache_does_not_reset_the_score_and_a_new_set_can(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Copying the cache is refused. A different fake list is a new test set."""
+    import shutil
+
+    monkeypatch.setenv(
+        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
+    )
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    copied = tmp_path / "fresh-cache"
+    shutil.copytree(cache, copied)
+    other = tmp_path / "other-out"
+    other.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(other),
+                "--cache",
+                str(copied),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "fresh --cache" in capsys.readouterr().err
+    manifest_path = copied / "2017-like" / "test" / "manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["parent_seed"] = 999
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    third = tmp_path / "third-out"
+    third.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(third),
+            "--cache",
+            str(copied),
+        ]
+    )
+    assert (third / "test_score.md").is_file()
 
 
 def _grid_argv(tmp_path: Path) -> list[str]:
@@ -734,6 +812,34 @@ def test_grid_exits_2_when_the_copy_verdict_fails(
         main(_grid_argv(tmp_path))
     assert caught.value.code == 2
     assert "FAIL" in capsys.readouterr().err
+
+
+def test_grid_exits_2_when_caught_but_not_judgeable_is_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A nonzero caught-but-not-judgeable count exits 2, like a sanity FAIL."""
+    from kilonova_hunter.grid import GridRun
+
+    monkeypatch.setattr("kilonova_hunter.cli.redback_available", lambda: True)
+
+    def fake_grid(**kwargs):
+        return GridRun(
+            text="tuning grid\n",
+            sign_off_blocker=True,
+            copy_status="caught-but-not-judgeable",
+            block_reasons=(
+                "caught-but-not-judgeable is not zero, which breaks rule 5 "
+                "and blocks sign-off",
+            ),
+        )
+
+    monkeypatch.setattr("kilonova_hunter.grid.run_tuning_grid", fake_grid)
+    with pytest.raises(SystemExit) as caught:
+        main(_grid_argv(tmp_path))
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert "blocks sign-off" in err
+    assert "rule 5" in err
 
 
 def test_grid_exits_0_when_the_copy_verdict_passes(
