@@ -341,6 +341,14 @@ def _slow_fading_curve() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _events_table(*object_ids: str, population: str) -> str:
+    """One events row per id, with the columns scoring reads."""
+    lines = ["object_id,kind,redshift,model_failed,merger_mjd,distance_mpc"]
+    for object_id in object_ids:
+        lines.append(f"{object_id},{population},0.01,0,59000.0,40.0")
+    return "\n".join(lines) + "\n"
+
+
 def _frozen_cuts(path: Path, *, frozen: bool) -> Path:
     path.write_text(
         json.dumps(
@@ -439,7 +447,10 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
     for population in ("2017-like", "realistic"):
         folder = cache / population / "test"
         folder.mkdir(parents=True)
-        (folder / "events.csv").write_text("object_id\n", encoding="utf-8")
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-sfd", population=population),
+            encoding="utf-8",
+        )
         (folder / "light_curves.csv").write_text(
             "object_id,time_days,filter,magnitude,magnitude_error\n",
             encoding="utf-8",
@@ -451,7 +462,7 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
                     "dust_mode": "sfd",
                     "cache_version": 3,
                     "diffusion_fix": "arnett-factor-2",
-                    "n_simulated": 0,
+                    "n_simulated": 1,
                 }
             ),
             encoding="utf-8",
@@ -494,7 +505,10 @@ def test_score_test_rejects_a_continue_cache_and_a_second_output(
     for population in ("2017-like", "realistic"):
         folder = cache / population / "test"
         folder.mkdir(parents=True)
-        (folder / "events.csv").write_text("object_id\n", encoding="utf-8")
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-1", population=population),
+            encoding="utf-8",
+        )
         (folder / "light_curves.csv").write_text(
             "object_id,time_days,filter,magnitude,magnitude_error\n",
             encoding="utf-8",
@@ -507,7 +521,7 @@ def test_score_test_rejects_a_continue_cache_and_a_second_output(
                     "dust_map": dust_map_label(),
                     "cache_version": CACHE_VERSION,
                     "diffusion_fix": DIFFUSION_FIX_ID,
-                    "n_simulated": 0,
+                    "n_simulated": 1,
                 }
             ),
             encoding="utf-8",
@@ -573,7 +587,10 @@ def _ready_test_cache(cache: Path) -> None:
     for population in ("2017-like", "realistic"):
         folder = cache / population / "test"
         folder.mkdir(parents=True)
-        (folder / "events.csv").write_text("object_id\n", encoding="utf-8")
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-1", population=population),
+            encoding="utf-8",
+        )
         (folder / "light_curves.csv").write_text(
             "object_id,time_days,filter,magnitude,magnitude_error\n",
             encoding="utf-8",
@@ -589,7 +606,8 @@ def _ready_test_cache(cache: Path) -> None:
                     "redback_version": "1.20.0",
                     "seed": 7,
                     "parent_seed": 11,
-                    "n_simulated": 0,
+                    "sample_size": {"target_judgeable": 1},
+                    "n_simulated": 1,
                 }
             ),
             encoding="utf-8",
@@ -640,8 +658,10 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
                 str(cache),
             ]
         )
+    # The exclusive claim is written before scoring. The ledger entry is
+    # written only after the score file exists, so a crash leaves no ledger.
     marker = tmp_path / "test_set_scored.json"
-    assert marker.is_file()
+    assert not marker.is_file()
     assert any((tmp_path / "test_set_claims").iterdir())
     assert not (output / "test_score.md").exists()
     # A changed cache does not clear the marker.
@@ -666,7 +686,7 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
         )
     assert caught.value.code == 1
     assert "scored once" in capsys.readouterr().err
-    assert marker.is_file()
+    assert not marker.is_file()
 
 
 def test_two_concurrent_score_runs_let_one_through(
@@ -752,10 +772,16 @@ def test_a_fresh_cache_does_not_reset_the_score_and_a_new_set_can(
         )
     assert caught.value.code == 1
     assert "fresh --cache" in capsys.readouterr().err
-    manifest_path = copied / "2017-like" / "test" / "manifest.json"
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    payload["parent_seed"] = 999
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    for population in ("2017-like", "realistic"):
+        folder = copied / population / "test"
+        manifest_path = folder / "manifest.json"
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["parent_seed"] = 999
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-new", population=population),
+            encoding="utf-8",
+        )
     third = tmp_path / "third-out"
     third.mkdir()
     main(
@@ -784,6 +810,7 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
     recorded, not hashed. Changing one of them does not open a rescore.
     A different seed does. There is no override flag.
     """
+    import hashlib
     import shutil
     import subprocess
 
@@ -820,11 +847,16 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
         assert recorded["redback_version"] == "1.20.0"
         assert recorded["diffusion_fix"] == DIFFUSION_FIX_ID
         assert recorded["dust_map"] == dust_map_label()
+        assert recorded["dust_mode"] == "sfd"
+    score_file = output / "test_score.md"
+    assert entry["score_path"] == str(score_file)
+    assert entry["score_sha256"] == hashlib.sha256(score_file.read_bytes()).hexdigest()
     changes = {
         "cache_version": 99,
         "redback_version": "9.9.9",
         "diffusion_fix": "not-the-fix",
         "dust_map": "a different map",
+        "dust_mode": "not-sfd",
     }
     for field, value in changes.items():
         copied = tmp_path / f"cache-{field}"
@@ -857,11 +889,16 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
     seeded = tmp_path / "cache-seed"
     shutil.copytree(cache, seeded)
     for population in ("2017-like", "realistic"):
-        manifest_path = seeded / population / "test" / "manifest.json"
+        folder = seeded / population / "test"
+        manifest_path = folder / "manifest.json"
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         payload["seed"] = 99
         payload["parent_seed"] = 99
         manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-other-seed", population=population),
+            encoding="utf-8",
+        )
     allowed = tmp_path / "out-seed"
     allowed.mkdir()
     main(
@@ -879,6 +916,204 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
     assert (allowed / "test_score.md").is_file()
     again = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
     assert len(again["sets"]) == 2
+
+
+def _ledger_text(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def test_overlap_refuses_a_larger_sample_and_a_decision_appends(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Same seed and a bigger sample shares ids, so it is not a new set.
+
+    Disjoint ids are allowed, including an id that was scored only in
+    the other population. A decision id appends the overlapping set.
+    A missing events table or an empty object_id column writes nothing
+    and leaves the ledger as it was.
+    """
+    import shutil
+
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    before = _ledger_text(scored_test_set_ledger)
+    first = json.loads(before)
+    first_hash = next(iter(first["sets"]))
+    first_entry = first["sets"][first_hash][0]
+    assert first_entry["object_ids"]["2017-like"] == ["2017-like-1"]
+    assert "sample_size" not in first_entry["population_spec"]["2017-like"]
+
+    bigger = tmp_path / "bigger"
+    shutil.copytree(cache, bigger)
+    for population in ("2017-like", "realistic"):
+        folder = bigger / population / "test"
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-1", f"{population}-2", population=population),
+            encoding="utf-8",
+        )
+        manifest_path = folder / "manifest.json"
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["sample_size"] = {"target_judgeable": 2}
+        payload["n_simulated"] = 2
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    refused = tmp_path / "bigger-out"
+    refused.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(refused),
+                "--cache",
+                str(bigger),
+            ]
+        )
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert "2 object ids" in err
+    assert "logged decision" in err
+    assert not (refused / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == before
+
+    disjoint = tmp_path / "disjoint"
+    shutil.copytree(cache, disjoint)
+    # 2017-like gets a new id. realistic reuses the id that was scored
+    # only for 2017-like. That id was not scored in the realistic population.
+    (disjoint / "2017-like" / "test" / "events.csv").write_text(
+        _events_table("2017-like-fresh", population="2017-like"),
+        encoding="utf-8",
+    )
+    (disjoint / "realistic" / "test" / "events.csv").write_text(
+        _events_table("2017-like-1", population="realistic"),
+        encoding="utf-8",
+    )
+    disjoint_out = tmp_path / "disjoint-out"
+    disjoint_out.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(disjoint_out),
+            "--cache",
+            str(disjoint),
+        ]
+    )
+    assert (disjoint_out / "test_score.md").is_file()
+    after_disjoint = json.loads(_ledger_text(scored_test_set_ledger))
+    assert first_hash in after_disjoint["sets"]
+    assert after_disjoint["sets"][first_hash][0] == first_entry
+    assert len(after_disjoint["sets"]) == 2
+
+    approved = _frozen_cuts(tmp_path / "approved.json", frozen=True)
+    overlap_out = tmp_path / "overlap-out"
+    overlap_out.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(approved),
+            "--rescore-decision",
+            "PM-overlap",
+            "--output",
+            str(overlap_out),
+            "--cache",
+            str(bigger),
+        ]
+    )
+    appended = json.loads(_ledger_text(scored_test_set_ledger))
+    assert appended["sets"][first_hash][0] == first_entry
+    new_hash = next(
+        key
+        for key in appended["sets"]
+        if key != first_hash and key not in after_disjoint["sets"]
+    )
+    recorded = appended["sets"][new_hash][-1]
+    assert recorded["decision_id"] == "PM-overlap"
+    assert "2017-like-1" in recorded["object_ids"]["2017-like"]
+    assert (overlap_out / "test_score.md").is_file()
+
+    saved = _ledger_text(scored_test_set_ledger)
+    missing = tmp_path / "missing-events"
+    shutil.copytree(bigger, missing)
+    (missing / "2017-like" / "test" / "events.csv").unlink()
+    missing_out = tmp_path / "missing-out"
+    missing_out.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(missing_out),
+                "--cache",
+                str(missing),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "events table is missing" in capsys.readouterr().err
+    assert not (missing_out / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == saved
+
+    empty = tmp_path / "empty-ids"
+    shutil.copytree(cache, empty)
+    for population in ("2017-like", "realistic"):
+        folder = empty / population / "test"
+        (folder / "events.csv").write_text(
+            "object_id,kind,redshift,model_failed,merger_mjd,distance_mpc\n",
+            encoding="utf-8",
+        )
+        manifest_path = folder / "manifest.json"
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["n_simulated"] = 0
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    empty_out = tmp_path / "empty-out"
+    empty_out.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(empty_out),
+                "--cache",
+                str(empty),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "no object_id values" in capsys.readouterr().err
+    assert not (empty_out / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == saved
 
 
 def test_an_approved_rescore_keeps_the_first_score(
@@ -911,7 +1146,6 @@ def test_an_approved_rescore_keeps_the_first_score(
     assert "decision_id" not in first
     approved = _frozen_cuts(tmp_path / "approved.json", frozen=True)
     payload = json.loads(approved.read_text(encoding="utf-8"))
-    payload["decision_id"] = "PM-12-21"
     payload["redder_than_g_minus_r"] = 0.2
     approved.write_text(json.dumps(payload), encoding="utf-8")
     second = tmp_path / "second"
@@ -922,6 +1156,8 @@ def test_an_approved_rescore_keeps_the_first_score(
             "--score-test",
             "--cuts",
             str(approved),
+            "--rescore-decision",
+            "PM-12-21",
             "--output",
             str(second),
             "--cache",
@@ -936,6 +1172,189 @@ def test_an_approved_rescore_keeps_the_first_score(
     assert (output / "test_score.md").is_file()
     assert (second / "test_score.md").is_file()
     capsys.readouterr()
+
+
+def test_a_decision_id_in_the_cuts_file_does_not_authorize_a_rescore(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A decision id stored in the cuts JSON is ignored."""
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    before = _ledger_text(scored_test_set_ledger)
+    payload = json.loads(cuts.read_text(encoding="utf-8"))
+    payload["decision_id"] = "PM-in-the-cuts-file"
+    cuts.write_text(json.dumps(payload), encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(other),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert "scored once" in err
+    assert "logged decision" in err
+    assert not (other / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == before
+
+
+def test_a_reused_decision_id_is_refused(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same decision id cannot approve this set twice."""
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    first = tmp_path / "first"
+    first.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(first),
+            "--cache",
+            str(cache),
+        ]
+    )
+    second = tmp_path / "second"
+    second.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--rescore-decision",
+            "PM-once",
+            "--output",
+            str(second),
+            "--cache",
+            str(cache),
+        ]
+    )
+    saved = _ledger_text(scored_test_set_ledger)
+    third = tmp_path / "third"
+    third.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--rescore-decision",
+                "PM-once",
+                "--output",
+                str(third),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "already used" in capsys.readouterr().err
+    assert not (third / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == saved
+
+
+def test_rescore_decision_on_a_never_scored_set_is_refused(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The flag does not score a set that has no earlier score."""
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    before = _ledger_text(scored_test_set_ledger)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--rescore-decision",
+                "PM-too-soon",
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "has not been scored" in capsys.readouterr().err
+    assert not (output / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == before
+    assert not (tmp_path / "test_set_claims").exists()
+
+
+def test_score_test_refuses_a_non_numeric_cut(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A cut that is not a number is refused before anything is written."""
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    payload = json.loads(cuts.read_text(encoding="utf-8"))
+    payload["min_g_minus_r_rise"] = "red"
+    cuts.write_text(json.dumps(payload), encoding="utf-8")
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    before = _ledger_text(scored_test_set_ledger)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert "must be a number" in err
+    assert "Nothing was written" in err
+    assert not (output / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == before
 
 
 def _grid_argv(tmp_path: Path) -> list[str]:
@@ -1111,11 +1530,9 @@ def test_grid_exits_0_when_the_copy_verdict_passes(
     assert "Sign-off blocker" not in capsys.readouterr().err
 
 
-def test_fetch_alerts_refuses_until_cuts_are_frozen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Without frozen cuts the command exits and writes nothing."""
-    alerts = pd.DataFrame(
+def _proxy_alerts() -> pd.DataFrame:
+    """Two nights, so the even night is tuning and the odd night is test."""
+    return pd.DataFrame(
         [
             {
                 "i:objectId": "a",
@@ -1137,52 +1554,59 @@ def test_fetch_alerts_refuses_until_cuts_are_frozen(
             },
         ]
     )
+
+
+def _assert_tuning_written_and_test_flags_refused(output: Path) -> None:
+    text = (output / "real_alert_slices.json").read_text(encoding="utf-8")
+    document = json.loads(text)
+    assert "n_flagged" in document["flag_counts"]["tuning"]
+    assert "refused" in document["flag_counts"]["test"]
+    assert (output / "ztf_proxy_alerts.csv").is_file()
+
+
+def test_fetch_alerts_writes_tuning_before_cuts_are_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tuning slices are written without frozen cuts. Test-slice flags are not."""
     monkeypatch.setattr(
         "kilonova_hunter.alerts.fetch_class_between",
-        lambda start, stop, **kwargs: alerts,
+        lambda start, stop, **kwargs: _proxy_alerts(),
     )
     output = tmp_path / "out"
     output.mkdir()
-    with pytest.raises(SystemExit) as caught:
-        main(
-            [
-                "recall",
-                "--fetch-alerts",
-                "--output",
-                str(output),
-                "--alert-start",
-                "2024-06-01",
-                "--alert-stop",
-                "2024-06-02",
-            ]
-        )
-    assert caught.value.code == 1
-    assert "Nothing was written" in capsys.readouterr().err
-    assert not (output / "real_alert_slices.json").exists()
-    assert not (output / "ztf_proxy_alerts.csv").exists()
+    main(
+        [
+            "recall",
+            "--fetch-alerts",
+            "--output",
+            str(output),
+            "--alert-start",
+            "2024-06-01",
+            "--alert-stop",
+            "2024-06-02",
+        ]
+    )
+    _assert_tuning_written_and_test_flags_refused(output)
 
     unfrozen = tmp_path / "unfrozen.json"
     unfrozen.write_text(json.dumps({"frozen": False}), encoding="utf-8")
     still = tmp_path / "still"
     still.mkdir()
-    with pytest.raises(SystemExit) as caught:
-        main(
-            [
-                "recall",
-                "--fetch-alerts",
-                "--output",
-                str(still),
-                "--cuts",
-                str(unfrozen),
-                "--alert-start",
-                "2024-06-01",
-                "--alert-stop",
-                "2024-06-02",
-            ]
-        )
-    assert caught.value.code == 1
-    assert not (still / "real_alert_slices.json").exists()
-    assert not (still / "ztf_proxy_alerts.csv").exists()
+    main(
+        [
+            "recall",
+            "--fetch-alerts",
+            "--output",
+            str(still),
+            "--cuts",
+            str(unfrozen),
+            "--alert-start",
+            "2024-06-01",
+            "--alert-stop",
+            "2024-06-02",
+        ]
+    )
+    _assert_tuning_written_and_test_flags_refused(still)
 
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
     frozen_out = tmp_path / "frozen"
@@ -1206,12 +1630,16 @@ def test_fetch_alerts_refuses_until_cuts_are_frozen(
     )
     assert "n_flagged" in frozen["flag_counts"]["test"]
     assert "refused" not in frozen["flag_counts"]["test"]
+    assert "n_flagged" in frozen["flag_counts"]["tuning"]
 
 
 def test_cuts_file_errors_are_not_frozen_and_do_not_raise(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A list, missing keys, or bad JSON is not frozen, and does not traceback."""
+    """A list, missing keys, or bad JSON is not frozen, and does not traceback.
+
+    Fetch still writes the tuning slice. Test-slice flag counts stay refused.
+    """
     from kilonova_hunter.cli import _cuts_are_frozen
 
     missing = _frozen_cuts(tmp_path / "missing-keys.json", frozen=True)
@@ -1233,29 +1661,25 @@ def test_cuts_file_errors_are_not_frozen_and_do_not_raise(
     assert ok is False
     assert "not valid JSON" in message
 
-    for path, expected in (
-        (missing, "missing"),
-        (listed, "JSON object"),
-        (broken, "not valid JSON"),
-    ):
+    monkeypatch.setattr(
+        "kilonova_hunter.alerts.fetch_class_between",
+        lambda start, stop, **kwargs: _proxy_alerts(),
+    )
+    for path in (missing, listed, broken):
         output = tmp_path / path.stem
         output.mkdir()
-        with pytest.raises(SystemExit) as caught:
-            main(
-                [
-                    "recall",
-                    "--fetch-alerts",
-                    "--output",
-                    str(output),
-                    "--cuts",
-                    str(path),
-                    "--alert-start",
-                    "2024-06-01",
-                    "--alert-stop",
-                    "2024-06-02",
-                ]
-            )
-        assert caught.value.code == 1
-        assert expected in capsys.readouterr().err
-        assert not (output / "real_alert_slices.json").exists()
-        assert not (output / "ztf_proxy_alerts.csv").exists()
+        main(
+            [
+                "recall",
+                "--fetch-alerts",
+                "--output",
+                str(output),
+                "--cuts",
+                str(path),
+                "--alert-start",
+                "2024-06-01",
+                "--alert-stop",
+                "2024-06-02",
+            ]
+        )
+        _assert_tuning_written_and_test_flags_refused(output)
