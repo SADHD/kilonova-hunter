@@ -531,6 +531,15 @@ MEASURED_G_MINUS_R_GAP_MAG = 0.4
 # +0.3 mag is the same shift with the instrument-to-LSST correction
 # taken off. The difference of the two recalls is that uncertainty.
 INSTRUMENT_TO_LSST_OFFSET_MAG = 0.3
+# Science Lead can narrow this scope by editing these three constants.
+# The report is both populations, days 3/5/7, both shifts, and both
+# judgeable definitions. It is not used to pick a cut.
+COLOR_SENSITIVITY_POPULATIONS = ("2017-like", "realistic")
+COLOR_SENSITIVITY_DAYS = (3.0, 5.0, 7.0)
+COLOR_SENSITIVITY_SHIFTS_MAG = (
+    MEASURED_G_MINUS_R_GAP_MAG,
+    INSTRUMENT_TO_LSST_OFFSET_MAG,
+)
 
 
 def g_minus_r_gap_by_day() -> tuple[tuple[float, float], ...]:
@@ -647,6 +656,64 @@ def format_color_sensitivity(
         "is the instrument to LSST correction uncertainty. "
         "This hook is not used to pick a cut."
     )
+
+
+def format_color_sensitivity_scope(
+    prepared_for_examples: dict,
+    combo: dict[str, float],
+    *,
+    populations: tuple[str, ...] = COLOR_SENSITIVITY_POPULATIONS,
+    days: tuple[float, ...] = COLOR_SENSITIVITY_DAYS,
+    shifts: tuple[float, ...] = COLOR_SENSITIVITY_SHIFTS_MAG,
+) -> str:
+    """Recall (a) and (b) for each population, day, and g-r shift.
+
+    ``prepared_for_examples`` is what the tuning grid keeps: a population
+    name mapped to ``(prepared_by_day, light_curves)``. A bare
+    ``prepared_by_day`` dict is accepted too. Changing the default
+    populations, days, or shifts is a constants change. This report is
+    not used to pick a cut.
+    """
+
+    def _percent(value: float) -> str:
+        if value != value:
+            return "no recall"
+        return f"{100.0 * value:.1f}%"
+
+    lines = [
+        "## Color sensitivity",
+        "",
+        "Placeholder cuts. Each line shifts g-r bluer and reports "
+        "recall (a), the official judgeable rule, and recall (b), "
+        "which also needs a usable g-r at r-peak + 1 day. "
+        "This is not used to pick a cut.",
+        "",
+    ]
+    for population in populations:
+        stored = prepared_for_examples.get(population)
+        if stored is None:
+            continue
+        prepared_by_day = stored[0] if isinstance(stored, tuple) else stored
+        for day in days:
+            prepared = prepared_by_day[float(day)]
+            for shift in shifts:
+                scored = recall_with_bluer_color(
+                    prepared,
+                    combo,
+                    float(shift),
+                    population=population,
+                    day=float(day),
+                )
+                lines.append(
+                    f"{population} day {float(day):g}, "
+                    f"g-r bluer by +{float(shift):.1f} mag: "
+                    f"recall (a) {_percent(scored['recall_judgeable'])}, "
+                    f"recall (b) {_percent(scored['recall_candidate'])}."
+                )
+            if uses_two_component_model(population) and float(day) >= 7.0:
+                lines.append(REALISTIC_DAY7_LABEL)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def has_g_minus_r_pair(curve: pd.DataFrame, *, max_gap_days: float = 1.0) -> bool:
@@ -1498,6 +1565,14 @@ def summarize_grid(
     return "\n".join(lines) + "\n"
 
 
+def _grid_run_header() -> str:
+    """Git SHA and redback version, printed at the top of the grid summary."""
+    from kilonova_hunter.cli import _git_sha
+    from kilonova_hunter.sample import _redback_version
+
+    return f"git {_git_sha()}\nredback {_redback_version()}\n\n"
+
+
 def run_tuning_grid(
     *,
     output_dir: Path | str = Path("results"),
@@ -1505,13 +1580,15 @@ def run_tuning_grid(
     sample_size=None,
     workers: int = 1,
     settings_path: Path | None = None,
+    splits: tuple[str, ...] | None = None,
 ) -> GridRun:
-    """Simulate both populations and both splits, then score the tuning grid.
+    """Simulate both populations and the given splits, then score tuning.
 
-    The test split is simulated and cached so a later score does not
-    redraw it. It is not scored here. No cut is picked. The returned
-    run says whether the exact-copy verdict blocks sign-off. The
-    command exits 2 in that case, and so does a nonzero
+    ``splits`` defaults to tuning and test. Pass ``("tuning",)`` to
+    leave the test split untouched: it is not simulated, read, or
+    written. The test split is never scored here. No cut is picked.
+    The returned run says whether the exact-copy verdict blocks
+    sign-off. The command exits 2 in that case, and so does a nonzero
     caught-but-not-judgeable count.
     """
     from kilonova_hunter.sample import (
@@ -1527,11 +1604,12 @@ def run_tuning_grid(
     settings = load_settings(settings_path)
     size = sample_size if sample_size is not None else SampleSizeSettings()
     dust = open_dust_source()
+    chosen_splits = SPLITS if splits is None else splits
     samples = []
     rows: list[dict] = []
     prepared_for_examples: dict[str, tuple] = {}
     for population in (LIKE_KIND, REALISTIC):
-        for split in SPLITS:
+        for split in chosen_splits:
             sample = simulate_population(
                 population,
                 split,
@@ -1603,14 +1681,13 @@ def run_tuning_grid(
             tuning_samples, prepared_for_examples, placeholder
         )
     )
-    like_prepared = prepared_for_examples.get(LIKE_KIND)
-    if like_prepared is not None:
+    if prepared_for_examples:
         text = (
             text.rstrip()
             + "\n\n"
-            + format_color_sensitivity(like_prepared[0][3.0], placeholder)
-            + "\n"
+            + format_color_sensitivity_scope(prepared_for_examples, placeholder)
         )
+    text = _grid_run_header() + text
     (destination / "tuning_grid.md").write_text(text, encoding="utf-8")
     return GridRun(
         text=text,

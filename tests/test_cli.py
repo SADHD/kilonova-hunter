@@ -1683,3 +1683,169 @@ def test_cuts_file_errors_are_not_frozen_and_do_not_raise(
             ]
         )
         _assert_tuning_written_and_test_flags_refused(output)
+
+
+def _patch_grid_draws(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the light-curve model and keep exact copies to one fake.
+
+    Distances come from the same rng both runs use, so two grids with
+    the parent seed write the same parameters. The real Planck18 draw
+    is not required for that comparison.
+    """
+    import numpy as np
+
+    from kilonova_hunter import sample as sample_mod
+    from kilonova_hunter.sky import DustSource
+
+    def fake_jobs(jobs, workers):
+        return [(job["event"].object_id, pd.DataFrame(), None) for job in jobs]
+
+    def fake_distances(rng, count, **kwargs):
+        drawn = rng.random(count)
+        return np.full(count, 0.009), 40.0 + 10.0 * np.asarray(drawn)
+
+    real_copies = sample_mod.simulate_exact_copies
+
+    def one_copy(**kwargs):
+        return real_copies(**{**kwargs, "count": 1})
+
+    monkeypatch.setattr("kilonova_hunter.cli.redback_available", lambda: True)
+    monkeypatch.setattr(
+        "kilonova_hunter.sky.open_dust_source",
+        lambda: DustSource(mode="dry-run", reason="fixture"),
+    )
+    monkeypatch.setattr(sample_mod, "_run_jobs", fake_jobs)
+    monkeypatch.setattr(sample_mod, "sample_luminosity_distances", fake_distances)
+    monkeypatch.setattr(
+        sample_mod, "redshift_at_luminosity_distance", lambda _distance: 0.009
+    )
+    monkeypatch.setattr(sample_mod, "simulate_exact_copies", one_copy)
+
+
+def _run_grid_fixture(cache: Path, output: Path, *, tuning_only: bool) -> None:
+    """One tiny grid. Exact copies are untestable, so the command exits 2."""
+    argv = [
+        "recall",
+        "--grid",
+        "--output",
+        str(output),
+        "--cache",
+        str(cache),
+        "--target",
+        "1",
+        "--cap",
+        "2",
+        "--floor",
+        "1",
+        "--batch-size",
+        "1",
+        "--workers",
+        "1",
+    ]
+    if tuning_only:
+        argv.append("--tuning-only")
+    output.mkdir(parents=True)
+    with pytest.raises(SystemExit) as caught:
+        main(argv)
+    assert caught.value.code == 2
+
+
+def _tuning_events(cache: Path) -> dict[str, bytes]:
+    found = {}
+    for population in ("2017-like", "realistic"):
+        path = cache / population / "tuning" / "events.csv"
+        found[population] = path.read_bytes()
+    return found
+
+
+def _test_identity(cache: Path) -> tuple[str, dict[str, list[str]]]:
+    from kilonova_hunter.cli import test_set_sha256
+    from kilonova_hunter.sample import LIKE_KIND, REALISTIC, _read_cache
+
+    loaded = []
+    ids: dict[str, list[str]] = {}
+    for population in (LIKE_KIND, REALISTIC):
+        cached = _read_cache(cache / population / "test")
+        assert cached is not None
+        manifest, events, _curves = cached
+        loaded.append((population, manifest, events, _curves))
+        ids[population] = [str(item) for item in events["object_id"].tolist()]
+    return test_set_sha256(loaded), ids
+
+
+def _paths_with_test_component(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    return [path for path in root.rglob("*") if "test" in path.parts]
+
+
+def _sha256(path: Path) -> str | None:
+    import hashlib
+
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_tuning_only_matches_a_full_run_on_the_same_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tuning ids and parameters do not depend on also drawing the test split."""
+    _patch_grid_draws(monkeypatch)
+    tuning_cache = tmp_path / "tuning-cache"
+    full_cache = tmp_path / "full-cache"
+    _run_grid_fixture(tuning_cache, tmp_path / "tuning-out", tuning_only=True)
+    _run_grid_fixture(full_cache, tmp_path / "full-out", tuning_only=False)
+    assert _tuning_events(tuning_cache) == _tuning_events(full_cache)
+
+
+def test_a_tuning_only_run_does_not_change_the_test_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test-set object ids and the identity hash ignore an earlier tuning-only run."""
+    _patch_grid_draws(monkeypatch)
+    full_cache = tmp_path / "full-cache"
+    _run_grid_fixture(full_cache, tmp_path / "full-out", tuning_only=False)
+    followed = tmp_path / "followed-cache"
+    _run_grid_fixture(followed, tmp_path / "tuning-out", tuning_only=True)
+    _run_grid_fixture(followed, tmp_path / "followed-out", tuning_only=False)
+    full_hash, full_ids = _test_identity(full_cache)
+    followed_hash, followed_ids = _test_identity(followed)
+    assert followed_ids == full_ids
+    assert followed_hash == full_hash
+    for population in ("2017-like", "realistic"):
+        full_events = (full_cache / population / "test" / "events.csv").read_bytes()
+        followed_events = (followed / population / "test" / "events.csv").read_bytes()
+        assert followed_events == full_events
+
+
+def test_tuning_only_writes_no_test_split_and_leaves_the_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scored_test_set_ledger: Path,
+) -> None:
+    """A tuning-only grid does not create a test split or change the ledger."""
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_ledger = repo_root / "results" / "test_set_scored.json"
+    before_repo = _sha256(repo_ledger)
+    before_fixture = _sha256(scored_test_set_ledger)
+    claims = tmp_path / "test_set_claims"
+    assert not claims.exists()
+    _patch_grid_draws(monkeypatch)
+    cache = tmp_path / "cache"
+    output = tmp_path / "out"
+    _run_grid_fixture(cache, output, tuning_only=True)
+    assert _paths_with_test_component(cache) == []
+    assert _paths_with_test_component(output) == []
+    assert (cache / "2017-like" / "tuning" / "events.csv").is_file()
+    assert (cache / "realistic" / "tuning" / "events.csv").is_file()
+    summary = (output / "tuning_grid.md").read_text(encoding="utf-8")
+    assert summary.startswith("git ")
+    assert "\nredback " in summary
+    assert "2017-like day 5, g-r bluer by +0.4 mag:" in summary
+    assert "realistic day 7, g-r bluer by +0.3 mag:" in summary
+    assert "recall (a)" in summary
+    assert "recall (b)" in summary
+    assert _sha256(scored_test_set_ledger) == before_fixture
+    assert _sha256(repo_ledger) == before_repo
+    assert not claims.exists()
