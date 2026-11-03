@@ -226,7 +226,11 @@ def evaluate_color_rule(
         )
 
     when = peak_time + settings.color_days_after_peak
-    color = g_minus_r_at_time(light_curve, when)
+    color = g_minus_r_at_time(
+        light_curve,
+        when,
+        max_gap_days=settings.max_color_interpolation_gap_days,
+    )
     if color.g_minus_r is None:
         return RuleResult(passed=False, explanation=color.explanation)
 

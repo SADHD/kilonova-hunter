@@ -286,7 +286,11 @@ def _color_value(visible: pd.DataFrame) -> float | None:
     peak = peak_time_days(visible, "r")
     if peak is None:
         return None
-    color = g_minus_r_at_time(visible, peak + THRESHOLDS.color_days_after_peak)
+    color = g_minus_r_at_time(
+        visible,
+        peak + THRESHOLDS.color_days_after_peak,
+        max_gap_days=THRESHOLDS.max_color_interpolation_gap_days,
+    )
     return color.g_minus_r
 
 

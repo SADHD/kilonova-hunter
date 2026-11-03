@@ -1214,7 +1214,11 @@ def diagnose_catch_window(
     peak = peak_time_days(visible, "r")
     color_value = float("nan")
     if peak is not None:
-        color = g_minus_r_at_time(visible, peak + THRESHOLDS.color_days_after_peak)
+        color = g_minus_r_at_time(
+            visible,
+            peak + THRESHOLDS.color_days_after_peak,
+            max_gap_days=THRESHOLDS.max_color_interpolation_gap_days,
+        )
         if color.g_minus_r is not None:
             color_value = float(color.g_minus_r)
     if not np.isfinite(color_value):
