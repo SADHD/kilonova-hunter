@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Download Fink ZTF alerts (class Unknown), a ZTF proxy for Rubin. "
-            "Writes results/real_alert_slices.json and "
+            "Writes results/real_alert_slices_fetched.json and "
             "results/ztf_proxy_alerts_tuning.csv. Until the cuts are frozen, "
             "only tuning-night rows are written. A frozen cuts file also "
             "writes results/ztf_proxy_alerts.csv."
@@ -377,7 +377,8 @@ def _cuts_are_frozen(path: Path | None) -> tuple[bool, str]:
 def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) -> None:
     """Download the ZTF proxy and write the tuning rows.
 
-    The nights are labeled immediately after the download. Unless the
+    The committed night lists label the rows immediately after download.
+    The frozen split file is never overwritten. Unless the
     cuts file is frozen, rows from the other nights are dropped before
     any file is written and before anything is printed. A frozen file
     may also write those rows, as the earlier fetch did.
@@ -407,7 +408,10 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
     if fetched.empty:
         _fail("Fink returned no alerts for that date range.")
     # Label, then drop the other nights, before any write or print.
-    labeled = label_night_slices(fetched)
+    try:
+        labeled = label_night_slices(fetched)
+    except ValueError as error:
+        _fail(f"{error} Nothing was written.")
     tuning_rows = tuning_only_alerts(labeled)
     if tuning_rows.empty:
         _fail("Fink returned no tuning-night alerts for that date range.")
@@ -424,7 +428,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
             start=start_day,
             stop=stop_day,
         )
-    path = output / "real_alert_slices.json"
+    path = output / "real_alert_slices_fetched.json"
     write_slice_document(document, path)
     tuning_path = output / TUNING_ALERTS_FILENAME
     tuning_rows.to_csv(tuning_path, index=False)

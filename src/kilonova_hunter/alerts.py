@@ -152,28 +152,37 @@ def split_nights(alerts: pd.DataFrame) -> tuple[list[int], list[int]]:
     return tuning, test
 
 
-def label_night_slices(alerts: pd.DataFrame) -> pd.DataFrame:
-    """Copy the table and mark each row tuning or test from one split.
+FROZEN_SPLIT_PATH = (
+    Path(__file__).resolve().parents[2] / "results/real_alert_slices.json"
+)
 
-    The split is the even and odd positions of the nights in this table.
-    Later code uses the mark, so dropping the test rows does not make a
-    new test slice out of the nights that remain.
-    """
+
+def label_night_slices(alerts: pd.DataFrame) -> pd.DataFrame:
+    """Label against the committed split, never against the fetched night order."""
+    try:
+        document = json.loads(FROZEN_SPLIT_PATH.read_text(encoding="utf-8"))
+        tuning = set(document["tuning"]["nights"])
+        test = set(document["test"]["nights"])
+        if not tuning or not test or tuning & test:
+            raise ValueError("empty or overlapping frozen lists")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError(
+            "The committed frozen night lists are missing or invalid."
+        ) from error
     labeled = alerts.copy()
-    if labeled.empty or "night" not in labeled.columns:
-        return labeled
-    _tuning, test = split_nights(labeled)
+    unknown = set(labeled["night"]) - tuning - test
+    if unknown:
+        raise ValueError("Fetched nights are outside the committed frozen split.")
     labeled[NIGHT_SLICE_COLUMN] = "tuning"
-    test_rows = labeled["night"].isin(test)
-    labeled.loc[test_rows, NIGHT_SLICE_COLUMN] = "test"
+    labeled.loc[labeled["night"].isin(test), NIGHT_SLICE_COLUMN] = "test"
     return labeled
 
 
 def tuning_only_alerts(alerts: pd.DataFrame) -> pd.DataFrame:
     """Tuning-night rows only.
 
-    A ``night_slice`` of ``test`` is removed. Without that column, even
-    positions of the nights in this table are kept. Either way the
+    A ``night_slice`` of ``test`` is removed. Without that column, the
+    committed frozen lists supply the labels. Either way the
     returned rows are the tuning slice of the table that was passed in.
     """
     if alerts.empty:
@@ -181,8 +190,7 @@ def tuning_only_alerts(alerts: pd.DataFrame) -> pd.DataFrame:
     if NIGHT_SLICE_COLUMN in alerts.columns:
         labels = alerts[NIGHT_SLICE_COLUMN].astype(str)
         return alerts.loc[labels == "tuning"].reset_index(drop=True)
-    tuning, _test = split_nights(alerts)
-    return alerts.loc[alerts["night"].isin(tuning)].reset_index(drop=True)
+    return tuning_only_alerts(label_night_slices(alerts))
 
 
 def read_tuning_alerts(directory: Path | str) -> pd.DataFrame:
@@ -192,10 +200,6 @@ def read_tuning_alerts(directory: Path | str) -> pd.DataFrame:
     ``ztf_proxy_alerts.csv``.
     """
     path = Path(directory) / TUNING_ALERTS_FILENAME
-    if path.name != TUNING_ALERTS_FILENAME:
-        raise RuntimeError(
-            "Tuning code reads ztf_proxy_alerts_tuning.csv, not ztf_proxy_alerts.csv."
-        )
     return tuning_only_alerts(pd.read_csv(path))
 
 
@@ -224,8 +228,16 @@ def build_slice_document(
     n_per_day: int = FINK_N_PER_DAY,
     include_test_flag_counts: bool = False,
 ) -> dict:
-    """The frozen description of the two slices. This is what gets committed."""
-    tuning, test = split_nights(alerts)
+    """Summarize fetched rows using their committed frozen night labels."""
+    labeled = label_night_slices(alerts)
+    tuning = sorted(
+        int(n)
+        for n in labeled.loc[labeled[NIGHT_SLICE_COLUMN] == "tuning", "night"].unique()
+    )
+    test = sorted(
+        int(n)
+        for n in labeled.loc[labeled[NIGHT_SLICE_COLUMN] == "test", "night"].unique()
+    )
     document = {
         "label": SLICE_LABEL,
         "query": {
@@ -251,8 +263,8 @@ def build_slice_document(
             "Simulated fakes use this, not the ZTF formula."
         ),
         "split": (
-            "Nights sorted by the night index. Even positions are the tuning "
-            "slice. Odd positions are the test slice. No night is in both."
+            "Labels from the committed results/real_alert_slices.json night lists. "
+            "Missing fetched nights never change the split."
         ),
         "note": (
             "The public latests endpoint returns alerts Fink labeled "
@@ -270,27 +282,6 @@ def build_slice_document(
         document["test"] = slice_summary(alerts, test)
         document["flag_counts"]["test"] = _slice_flag_counts(alerts, test)
     return document
-
-
-def _flag_counts_for_slices(
-    alerts: pd.DataFrame,
-    tuning: list[int],
-    test: list[int],
-    *,
-    include_test: bool,
-) -> dict:
-    """Tuning-slice flags always. Test-slice flags only after cuts are frozen."""
-    counts: dict = {"tuning": _slice_flag_counts(alerts, tuning)}
-    if include_test:
-        counts["test"] = _slice_flag_counts(alerts, test)
-    else:
-        counts["test"] = {
-            "refused": (
-                "Test-slice flag counts are not written until a frozen-cuts "
-                "file exists."
-            )
-        }
-    return counts
 
 
 def _slice_flag_counts(alerts: pd.DataFrame, nights: list[int]) -> dict:

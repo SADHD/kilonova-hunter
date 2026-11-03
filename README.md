@@ -217,7 +217,12 @@ It scores the tuning split only. `kilohunt recall --score-test --cuts
 
 `kilohunt recall --fetch-alerts` downloads a ZTF proxy for Rubin from
 Fink's public API (class `Unknown`) and writes
-`results/real_alert_slices.json`. A ZTF night is `floor(MJD - 20/24)`,
+`results/real_alert_slices_fetched.json` and
+`results/ztf_proxy_alerts_tuning.csv`. It labels rows using the committed
+night lists in `results/real_alert_slices.json`, which it never overwrites.
+Missing nights do not change the split; unknown nights are refused.
+Until cuts are frozen, no test-night rows or totals are written or printed.
+A ZTF night is `floor(MJD - 20/24)`,
 which changes at 20:00 UTC, local noon at Palomar in Pacific Standard
 Time. The tuning and test slices do not share a night.
 
