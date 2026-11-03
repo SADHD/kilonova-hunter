@@ -475,16 +475,16 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
 
 
 def test_score_test_rejects_a_continue_cache_and_a_second_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """An unfinished cache is refused, and a second output directory is too."""
     from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
     from kilonova_hunter.sample import CACHE_VERSION
     from kilonova_hunter.sky import dust_map_label
 
-    monkeypatch.setenv(
-        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
-    )
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
     output = tmp_path / "results"
     output.mkdir()
     other = tmp_path / "other-results"
@@ -607,12 +607,13 @@ def _score_argv(argv: list[str]) -> int:
 
 
 def test_score_marker_is_exclusive_and_survives_a_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The marker is created before scoring. A crash still blocks a second run."""
-    monkeypatch.setenv(
-        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
-    )
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
     output = tmp_path / "results"
     output.mkdir()
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
@@ -666,14 +667,17 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
 
 
 def test_two_concurrent_score_runs_let_one_through(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, scored_test_set_ledger: Path
 ) -> None:
-    """O_EXCL lets one of two simultaneous scores create the marker."""
+    """O_EXCL lets one of two simultaneous scores create the marker.
+
+    The child processes are forked so they inherit the ledger fixture.
+    A spawned interpreter would import a fresh module and write the
+    repository ledger instead.
+    """
     import multiprocessing
 
-    monkeypatch.setenv(
-        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
-    )
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
     cache = tmp_path / "cache"
     _ready_test_cache(cache)
@@ -691,7 +695,7 @@ def test_two_concurrent_score_runs_let_one_through(
     ]
     argv_a = [*shared, "--output", str(first)]
     argv_b = [*shared, "--output", str(second)]
-    context = multiprocessing.get_context("spawn")
+    context = multiprocessing.get_context("fork")
     with context.Pool(2) as pool:
         codes = pool.map(_score_argv, [argv_a, argv_b])
     assert sorted(codes) == [0, 1]
@@ -701,14 +705,14 @@ def test_two_concurrent_score_runs_let_one_through(
 
 
 def test_a_fresh_cache_does_not_reset_the_score_and_a_new_set_can(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Copying the cache is refused. A different fake list is a new test set."""
     import shutil
 
-    monkeypatch.setenv(
-        "KILONOVA_TEST_SET_SCORED", str(tmp_path / "test_set_scored.json")
-    )
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
     cache = tmp_path / "cache"
     _ready_test_cache(cache)
@@ -849,3 +853,106 @@ def test_grid_exits_0_when_the_copy_verdict_passes(
     _patch_grid(monkeypatch, None)
     main(_grid_argv(tmp_path))
     assert "Sign-off blocker" not in capsys.readouterr().err
+
+
+def test_fetch_alerts_skips_test_slice_flags_until_cuts_are_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test-slice flag counts stay unwritten until a frozen cuts file exists."""
+    alerts = pd.DataFrame(
+        [
+            {
+                "i:objectId": "a",
+                "i:jd": 2450000.5,
+                "i:fid": 1,
+                "i:magpsf": 20.0,
+                "i:sigmapsf": 0.05,
+                "mjd": 50000.0,
+                "night": 60000,
+            },
+            {
+                "i:objectId": "b",
+                "i:jd": 2450001.5,
+                "i:fid": 1,
+                "i:magpsf": 20.0,
+                "i:sigmapsf": 0.05,
+                "mjd": 50001.0,
+                "night": 60001,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "kilonova_hunter.alerts.fetch_class_between",
+        lambda start, stop, **kwargs: alerts,
+    )
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--fetch-alerts",
+            "--output",
+            str(output),
+            "--alert-start",
+            "2024-06-01",
+            "--alert-stop",
+            "2024-06-02",
+        ]
+    )
+    document = json.loads(
+        (output / "real_alert_slices.json").read_text(encoding="utf-8")
+    )
+    assert "n_flagged" in document["flag_counts"]["tuning"]
+    assert document["flag_counts"]["test"] == {
+        "refused": (
+            "Test-slice flag counts are not written until a frozen-cuts file exists."
+        )
+    }
+
+    unfrozen = tmp_path / "unfrozen.json"
+    unfrozen.write_text(json.dumps({"frozen": False}), encoding="utf-8")
+    still = tmp_path / "still"
+    still.mkdir()
+    main(
+        [
+            "recall",
+            "--fetch-alerts",
+            "--output",
+            str(still),
+            "--cuts",
+            str(unfrozen),
+            "--alert-start",
+            "2024-06-01",
+            "--alert-stop",
+            "2024-06-02",
+        ]
+    )
+    still_doc = json.loads(
+        (still / "real_alert_slices.json").read_text(encoding="utf-8")
+    )
+    assert "refused" in still_doc["flag_counts"]["test"]
+    assert "n_flagged" not in still_doc["flag_counts"]["test"]
+
+    cuts = tmp_path / "cuts.json"
+    cuts.write_text(json.dumps({"frozen": True}), encoding="utf-8")
+    frozen_out = tmp_path / "frozen"
+    frozen_out.mkdir()
+    main(
+        [
+            "recall",
+            "--fetch-alerts",
+            "--output",
+            str(frozen_out),
+            "--cuts",
+            str(cuts),
+            "--alert-start",
+            "2024-06-01",
+            "--alert-stop",
+            "2024-06-02",
+        ]
+    )
+    frozen = json.loads(
+        (frozen_out / "real_alert_slices.json").read_text(encoding="utf-8")
+    )
+    assert "n_flagged" in frozen["flag_counts"]["test"]
+    assert "refused" not in frozen["flag_counts"]["test"]

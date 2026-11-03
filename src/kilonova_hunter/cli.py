@@ -267,7 +267,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.command == "recall":
         if args.fetch_alerts:
-            _run_fetch_alerts(args.output, args.alert_start, args.alert_stop)
+            _run_fetch_alerts(
+                args.output,
+                args.alert_start,
+                args.alert_stop,
+                args.cuts,
+            )
             return
         if args.grid:
             _run_grid(args)
@@ -307,8 +312,22 @@ def _run_demo(output: Path, seed: int, save_csv: Path | None) -> None:
     print(_format_verdict(is_kilonova_candidate(noise_free)))
 
 
-def _run_fetch_alerts(output: Path, start: str, stop: str) -> None:
-    """Download the ZTF proxy slices and write the frozen JSON."""
+def _cuts_are_frozen(path: Path | None) -> bool:
+    """True when ``path`` is a JSON file with ``"frozen": true``."""
+    import json
+
+    if path is None or not path.is_file():
+        return False
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload.get("frozen") is True
+
+
+def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) -> None:
+    """Download the ZTF proxy slices and write the frozen JSON.
+
+    Test-slice flag counts are written only when ``cuts`` is a frozen
+    cuts file. Until then only the tuning slice is counted.
+    """
     from datetime import date
 
     from kilonova_hunter.alerts import (
@@ -327,7 +346,12 @@ def _run_fetch_alerts(output: Path, start: str, stop: str) -> None:
     alerts = fetch_class_between(start_day, stop_day)
     if alerts.empty:
         _fail("Fink returned no alerts for that date range.")
-    document = build_slice_document(alerts, start=start_day, stop=stop_day)
+    document = build_slice_document(
+        alerts,
+        start=start_day,
+        stop=stop_day,
+        include_test_flag_counts=_cuts_are_frozen(cuts),
+    )
     path = output / "real_alert_slices.json"
     write_slice_document(document, path)
     alerts_path = output / "ztf_proxy_alerts.csv"
@@ -449,6 +473,9 @@ def _run_score_test(args) -> None:
     print(text)
 
 
+# Pending Science Lead: whether cache_version, redback_version,
+# diffusion_fix, and the dust map belong in this hash. They are included
+# for now. Do not drop them until that ruling.
 _TEST_SET_SPEC_KEYS = (
     "parent_seed",
     "seed",
@@ -462,14 +489,19 @@ _TEST_SET_SPEC_KEYS = (
 )
 
 
-def test_set_scored_path() -> Path:
-    """Committed ledger of scored test sets. Not inside the cache folder."""
-    import os
+def _repo_root() -> Path:
+    """Directory that contains ``src`` and ``results``. Not the working directory."""
+    return Path(__file__).resolve().parents[2]
 
-    override = os.environ.get("KILONOVA_TEST_SET_SCORED")
-    if override:
-        return Path(override)
-    return Path("results") / "test_set_scored.json"
+
+def test_set_scored_path() -> Path:
+    """Committed ledger of scored test sets. Not inside the cache folder.
+
+    After a score, commit this file and ``results/test_set_claims/`` with
+    the score. A later checkout then refuses the same test set even if
+    the cache directory is new.
+    """
+    return _repo_root() / "results" / "test_set_scored.json"
 
 
 def test_set_claim_dir() -> Path:

@@ -65,8 +65,16 @@ def test_constant_heating_reaches_the_arnett_curve() -> None:
         # Relative, so t/t_d = 0.1 (about 0.01) is not compared with an
         # absolute 0.005 that would also accept half the right answer.
         assert found == pytest.approx(target, rel=0.02)
-        half = target / 2.0
-        assert half != pytest.approx(target, rel=0.02)
+    # Outside the wrapper this is redback's own integral, which uses
+    # t / t_d^2 where Arnett has 2 t / t_d^2. At t/t_d = 0.1 that value
+    # misses the analytic curve by far more than the 2 percent tolerance.
+    from redback.transient_models import kilonova_models
+
+    unfixed = kilonova_models._kilonova_diffusion_luminosity(
+        times, heating, diffusion_time
+    )
+    unfixed_at_tenth = _ratio_at(times, unfixed / heating, 0.1)
+    assert unfixed_at_tenth != pytest.approx(early[0.1], rel=0.02)
 
 
 def test_diffusion_time_is_not_doubled() -> None:
