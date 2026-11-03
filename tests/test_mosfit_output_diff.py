@@ -17,7 +17,11 @@ def _compare():
 
 def test_float_noise_and_log_lines_are_not_failures() -> None:
     compare = _compare()
-    found = "11:01 redback WARNING : missing\nvalue +0.423\n"
+    found = (
+        "11:01 redback WARNING : missing\n"
+        "Downloading https://sncosmo.github.io/data/bandpasses/csp/g.dat [Done]\n"
+        "value +0.423\n"
+    )
     expected = "09:00 redback INFO    : ready\nvalue +0.4231\n"
     assert compare(found, expected) == []
 

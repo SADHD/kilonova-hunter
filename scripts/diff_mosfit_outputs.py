@@ -1,7 +1,8 @@
 """Rerun every checks/mosfit script and compare it with the committed .out.
 
 Log lines from redback and bilby carry a timestamp, so those lines are
-dropped. Numbers may differ by float noise. Anything else has to match.
+dropped. A fresh machine also prints one line per sncosmo bandpass it
+downloads. Numbers may differ by float noise. Anything else has to match.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ def _scientific_lines(text: str) -> list[str]:
     kept = []
     for line in text.splitlines():
         if any(marker in line for marker in _LOG_MARKERS):
+            continue
+        # sncosmo prints this only when the bandpass is not cached yet.
+        if line.strip().startswith("Downloading http"):
             continue
         kept.append(line)
     return kept
