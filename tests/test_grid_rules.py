@@ -586,6 +586,9 @@ def test_exact_copy_loop_stops_at_the_4000_cap_untestable(
         return [(job["event"].object_id, pd.DataFrame(), None) for job in jobs]
 
     monkeypatch.setattr(sample_mod, "_run_jobs", fake_jobs)
+    monkeypatch.setattr(
+        sample_mod, "redshift_at_luminosity_distance", lambda _distance: 0.009
+    )
     result = simulate_exact_copies(
         dust=DustSource(mode="dry-run", reason="test"),
         cache_dir=tmp_path,
@@ -625,6 +628,9 @@ def test_copy_loop_switch_covers_both_judgeable_definitions(
 
     monkeypatch.setattr(sample_mod, "_event_record", official_only)
     monkeypatch.setattr(sample_mod, "_run_jobs", fake_jobs)
+    monkeypatch.setattr(
+        sample_mod, "redshift_at_luminosity_distance", lambda _distance: 0.009
+    )
     dust = DustSource(mode="dry-run", reason="test")
     official = simulate_exact_copies(
         dust=dust,
