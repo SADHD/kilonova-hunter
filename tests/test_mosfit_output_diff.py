@@ -27,8 +27,14 @@ def test_float_noise_is_allowed_and_extra_stdout_is_not() -> None:
     assert compare("redback WARNING : missing\nvalue +0.423\n", "value +0.423\n")
 
 
-def test_a_real_number_change_or_a_count_change_fails() -> None:
+def test_printed_precision_rejects_a_hundredth_at_three_decimals() -> None:
+    """One unit in the last printed digit of 20.625 is 0.001, not 0.02."""
     compare = _compare()
-    assert compare("gap +0.41\n", "gap +0.42\n")
+    assert compare("mag 20.625\n", "mag 20.625\n") == []
+    assert compare("mag 20.635\n", "mag 20.625\n")
+
+
+def test_a_count_change_or_a_word_change_fails() -> None:
+    compare = _compare()
     assert compare("n_g 25\n", "n_g 26\n")
     assert compare("label changed\n", "label original\n")
