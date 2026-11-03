@@ -294,6 +294,48 @@ def test_caught_but_not_judgeable_check_includes_day_7() -> None:
     assert "SIGN-OFF" not in text
 
 
+def test_judgeable_copy_records_a_skipped_reddening_rule() -> None:
+    """A judgeable copy with one color records reddening as skipped.
+
+    The official judgeable rule still accepts the copy. The breakdown
+    says the reddening rule could not run, which is not a failed rise.
+    """
+    from kilonova_hunter.grid import (
+        exact_copy_rule_breakdown,
+        format_exact_copy_breakdown,
+    )
+
+    events = pd.DataFrame(
+        {
+            "object_id": ["at2017gfo-exact-000"],
+            "merger_mjd": [60000.0],
+        }
+    )
+    curves = pd.DataFrame(
+        {
+            "object_id": ["at2017gfo-exact-000"] * 3,
+            "time_days": [0.1, 0.1, 1.6],
+            "filter": ["g", "r", "g"],
+            "magnitude": [18.0, 18.2, 19.0],
+            "magnitude_error": [0.05, 0.05, 0.05],
+        }
+    )
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    report = exact_copy_rule_breakdown(events, curves, combo)
+    assert report["n_judgeable"] == 1
+    assert report["rows"][0]["reddening"] == "skipped"
+    assert report["n_judgeable_reddening_skipped"] == 1
+    text = format_exact_copy_breakdown(report)
+    assert "Finding:" in text
+    assert "official judgeable" in text
+    assert "window 2 days" in text
+
+
 def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     """No judgeable copy is a blocker, not a blank that can be signed off."""
     from kilonova_hunter.grid import _copy_lines
