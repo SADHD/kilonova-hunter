@@ -134,18 +134,20 @@ def sample_luminosity_distances(
     near_mpc: float = 10.0,
     far_mpc: float = 300.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Draw distances that are uniform in Planck18 comoving volume.
+    """Draw distances uniform in Planck18 comoving volume.
 
-    The edges ``near_mpc`` and ``far_mpc`` are comoving distances.
-    The returned distance is the luminosity distance, because that is
-    what sets the brightness. The returned redshift is the Planck18
-    redshift at that luminosity distance.
+    ``near_mpc`` and ``far_mpc`` are luminosity distances, not comoving
+    ones. The shell is the comoving volume between the redshifts that
+    have those luminosity distances, so every fake we keep sits between
+    10 and 300 Mpc of luminosity distance. A draw that used comoving
+    edges of 10 and 300 would let the luminosity distance run a little
+    past 300, and the far bin is not allowed to do that.
     """
     if count < 1:
         raise ValueError(f"count must be at least 1, got {count}.")
-    redshift, comoving, volume, luminosity = _planck_grid()
-    z_near = float(np.interp(near_mpc, comoving, redshift))
-    z_far = float(np.interp(far_mpc, comoving, redshift))
+    redshift, _comoving, volume, luminosity = _planck_grid()
+    z_near = redshift_at_luminosity_distance(near_mpc)
+    z_far = redshift_at_luminosity_distance(far_mpc)
     volume_near = float(np.interp(z_near, redshift, volume))
     volume_far = float(np.interp(z_far, redshift, volume))
     drawn = rng.uniform(volume_near, volume_far, size=count)

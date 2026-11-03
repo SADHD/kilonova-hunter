@@ -136,6 +136,69 @@ def test_power_is_one_when_every_draw_would_clear_the_bar() -> None:
     assert low >= 0.70
 
 
+def _one_prepared(object_id: str, distance_mpc: float) -> PreparedFake:
+    return PreparedFake(
+        object_id=object_id,
+        distance_mpc=distance_mpc,
+        judgeable=True,
+        model_failed=False,
+        fade_passed=True,
+        color_value=0.5,
+        rises={(2.0, 0.5): 0.4},
+    )
+
+
+def test_far_distance_bin_ends_at_300_and_includes_300() -> None:
+    """300 Mpc is in the 200-300 bin. A fake past 300 is in no bin."""
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    prepared = [
+        _one_prepared("near-edge", 100.0),
+        _one_prepared("far-edge", 300.0),
+        _one_prepared("past-far", 300.1),
+    ]
+    near = score_prepared(
+        prepared,
+        combo,
+        population="2017-like",
+        day=3.0,
+        status="ready",
+        distance_bin="10-100",
+        low_mpc=10.0,
+        high_mpc=100.0,
+        high_inclusive=False,
+    )
+    middle = score_prepared(
+        prepared,
+        combo,
+        population="2017-like",
+        day=3.0,
+        status="ready",
+        distance_bin="100-200",
+        low_mpc=100.0,
+        high_mpc=200.0,
+        high_inclusive=False,
+    )
+    far = score_prepared(
+        prepared,
+        combo,
+        population="2017-like",
+        day=3.0,
+        status="ready",
+        distance_bin="200-300",
+        low_mpc=200.0,
+        high_mpc=300.0,
+        high_inclusive=True,
+    )
+    assert near["n_total"] == 0
+    assert middle["n_total"] == 1
+    assert far["n_total"] == 1
+
+
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
     """A copy mixed into the table does not change n_total."""
     prepared = [

@@ -49,13 +49,13 @@ from kilonova_hunter.judge import JUDGE_DAYS, is_judgeable
 from kilonova_hunter.recall import light_curve_for_the_filter, wilson_interval
 from kilonova_hunter.villar import EXACT_KIND
 
-# Luminosity-distance bins, in Mpc. The draw is uniform in comoving
-# volume out to 300 Mpc, so a few luminosity distances sit a little
-# past 300. Those stay in the last bin.
+# Luminosity-distance bins, in Mpc. The last edge is 300 and it is
+# inclusive, so a fake at exactly 300 Mpc is in the 200-300 bin and
+# nothing past 300 is.
 DISTANCE_BINS = (
-    ("10-100", 10.0, 100.0),
-    ("100-200", 100.0, 200.0),
-    ("200-300", 200.0, 10_000.0),
+    ("10-100", 10.0, 100.0, False),
+    ("100-200", 100.0, 200.0, False),
+    ("200-300", 200.0, 300.0, True),
 )
 
 _SETTINGS_PATH = Path(__file__).with_name("recall_settings.json")
@@ -460,11 +460,21 @@ def score_prepared(
     distance_bin: str = "all",
     low_mpc: float | None = None,
     high_mpc: float | None = None,
+    high_inclusive: bool = False,
 ) -> dict:
     """One grid cell: a cut, a population, a day, and maybe a distance bin."""
     chosen = prepared
     if low_mpc is not None and high_mpc is not None:
-        chosen = [fake for fake in prepared if low_mpc <= fake.distance_mpc < high_mpc]
+        if high_inclusive:
+            chosen = [
+                fake
+                for fake in prepared
+                if low_mpc <= fake.distance_mpc <= high_mpc
+            ]
+        else:
+            chosen = [
+                fake for fake in prepared if low_mpc <= fake.distance_mpc < high_mpc
+            ]
     caught = 0
     judgeable = 0
     judge_caught = 0
@@ -531,7 +541,7 @@ def score_grid(
                     status=status,
                 )
             )
-            for name, low, high in DISTANCE_BINS:
+            for name, low, high, high_inclusive in DISTANCE_BINS:
                 rows.append(
                     score_prepared(
                         prepared,
@@ -542,6 +552,7 @@ def score_grid(
                         distance_bin=name,
                         low_mpc=low,
                         high_mpc=high,
+                        high_inclusive=high_inclusive,
                     )
                 )
     return rows
@@ -810,8 +821,8 @@ def summarize_grid(
     lines.append("## Distance bins")
     lines.append("")
     lines.append(
-        "Bins are luminosity distance: 10-100, 100-200, and 200 Mpc and farther "
-        "(the draw stops at 300 Mpc comoving, so the last bin is the 200-300 Mpc bin)."
+        "Bins are luminosity distance: 10-100, 100-200, and 200-300 Mpc. "
+        "The last bin ends at 300."
     )
     return "\n".join(lines) + "\n"
 
