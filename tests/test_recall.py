@@ -517,16 +517,16 @@ def test_redback_sanity_fake_returns_finite_magnitudes() -> None:
         assert magnitudes.shape == (3,)
         assert np.isfinite(magnitudes).all()
 
-        # No dust. The brightest r point of this analytic model sits near
-        # 18.1. Observed peak r is about 17.2 to 17.5, so the model is
-        # faint by under a magnitude. A distance-unit mistake would move
-        # it by several magnitudes, which this range would catch.
+        # No dust. With the diffusion integral fixed, the brightest r
+        # point of this model sits near 17.3. Before that fix it sat
+        # near 18.1. A distance-unit mistake would move it by several
+        # magnitudes, which this range would catch.
         no_dust = replace(event, ebv=0.0)
         grid = np.linspace(0.4, 2.0, 17)
         peak_r = float(
             np.min(redback_magnitudes(grid, np.array(["r"] * len(grid)), no_dust))
         )
-        assert 17.6 < peak_r < 18.6
+        assert 16.8 < peak_r < 17.8
 
         from redback.ejecta_relations import TwoComponentBNS
 
@@ -672,3 +672,23 @@ def test_cache_key_includes_depths_redback_and_the_dust_map() -> None:
     )
     assert loaded.n_judgeable_day3 == 2
     assert loaded.n_model_failed == 0
+
+
+def test_realistic_temperature_floors_stay_at_the_redback_defaults() -> None:
+    """5000 K and 2500 K stay. The other pair is labeled NOT-COUNTED."""
+    from kilonova_hunter.villar import (
+        NOT_COUNTED_TF_DYNAMICAL_K,
+        NOT_COUNTED_TF_WIND_K,
+        not_counted_realistic_event,
+    )
+
+    settings = PopulationSettings()
+    assert settings.tf_wind == 5000.0
+    assert settings.tf_dynamical == 2500.0
+    event = replace(at2017gfo_like_event(), kind="population", ebv=0.0)
+    variant = not_counted_realistic_event(event)
+    assert variant.tf_dynamical == NOT_COUNTED_TF_DYNAMICAL_K == 3745.0
+    assert variant.tf_wind == NOT_COUNTED_TF_WIND_K == 1308.0
+    assert event.tf_dynamical == 2500.0
+    assert event.tf_wind == 5000.0
+    assert "NOT-COUNTED" in (not_counted_realistic_event.__doc__ or "")

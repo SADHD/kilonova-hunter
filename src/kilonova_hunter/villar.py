@@ -237,27 +237,31 @@ def villar_magnitudes(
     )
 
     from kilonova_hunter.recall import _SNCOSMO_BANDS
+    from kilonova_hunter.redback_fix import corrected_diffusion
 
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
-    raw = three_component_kilonova_model(
-        np.asarray(times, dtype=float),
-        event.redshift,
-        event.blue.mej,
-        event.blue.vej,
-        event.blue.temperature_floor,
-        event.blue.kappa,
-        event.purple.mej,
-        event.purple.vej,
-        event.purple.temperature_floor,
-        event.purple.kappa,
-        event.red.mej,
-        event.red.vej,
-        event.red.temperature_floor,
-        event.red.kappa,
-        bands=sn_bands,
-        output_format="magnitude",
-        cosmology=Planck18,
-    )
+    # The temperature floors are positional on purpose. redback's default
+    # floor is 4000 K, which is not the Villar table.
+    with corrected_diffusion():
+        raw = three_component_kilonova_model(
+            np.asarray(times, dtype=float),
+            event.redshift,
+            event.blue.mej,
+            event.blue.vej,
+            event.blue.temperature_floor,
+            event.blue.kappa,
+            event.purple.mej,
+            event.purple.vej,
+            event.purple.temperature_floor,
+            event.purple.kappa,
+            event.red.mej,
+            event.red.vej,
+            event.red.temperature_floor,
+            event.red.kappa,
+            bands=sn_bands,
+            output_format="magnitude",
+            cosmology=Planck18,
+        )
     dust = extinction_for_bands(event.ebv, bands)
     return np.asarray(raw, dtype=float) + dust
 
@@ -279,6 +283,12 @@ def realistic_magnitudes(
     This is the same model the older ``redback_magnitudes`` uses. The
     difference is the dust: Fitzpatrick 1999 at R_V = 3.1, not the
     fixed Schlafly and Finkbeiner band coefficients.
+
+    The temperature floors on the event are redback's defaults when the
+    recall built the event: 5000 K for the wind and 2500 K for the
+    dynamical ejecta. Those defaults stay. A NOT-COUNTED variant uses
+    different floors; that copy is ``not_counted_realistic_event`` and
+    it is not part of the recall.
     """
     from astropy.cosmology import Planck18
     from redback.transient_models.kilonova_models import (
@@ -286,25 +296,52 @@ def realistic_magnitudes(
     )
 
     from kilonova_hunter.recall import _SNCOSMO_BANDS
+    from kilonova_hunter.redback_fix import corrected_diffusion
 
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
-    raw = two_component_bns_ejecta_relation(
-        np.asarray(times, dtype=float),
-        event.redshift,
-        event.mass_1,
-        event.mass_2,
-        event.lambda_1,
-        event.lambda_2,
-        event.mtov,
-        event.zeta,
-        event.vej_wind,
-        event.kappa_dynamical,
-        event.kappa_wind,
-        event.tf_dynamical,
-        event.tf_wind,
-        bands=sn_bands,
-        output_format="magnitude",
-        cosmology=Planck18,
-    )
+    with corrected_diffusion():
+        raw = two_component_bns_ejecta_relation(
+            np.asarray(times, dtype=float),
+            event.redshift,
+            event.mass_1,
+            event.mass_2,
+            event.lambda_1,
+            event.lambda_2,
+            event.mtov,
+            event.zeta,
+            event.vej_wind,
+            event.kappa_dynamical,
+            event.kappa_wind,
+            event.tf_dynamical,
+            event.tf_wind,
+            bands=sn_bands,
+            output_format="magnitude",
+            cosmology=Planck18,
+        )
     dust = extinction_for_bands(event.ebv, bands)
     return np.asarray(raw, dtype=float) + dust
+
+
+# NOT-COUNTED. These floors are not used by the recall or the grid.
+# 3745 K is Villar's red floor. The realistic dynamical ejecta use
+# opacity 10, the same opacity as that red component.
+# 1308 K is Villar's purple floor. The realistic wind uses opacity 0.5,
+# while the purple component uses opacity 3, so that match is not exact.
+NOT_COUNTED_TF_DYNAMICAL_K = 3745.0
+NOT_COUNTED_TF_WIND_K = 1308.0
+
+
+def not_counted_realistic_event(event):
+    """Copy one realistic event onto the NOT-COUNTED temperature floors.
+
+    Do not put this copy into a recall, a catch rate, or the grid. It
+    exists so a report can show the same ejecta with floors matched to
+    Villar by opacity, beside the redback-default floors the recall uses.
+    """
+    from dataclasses import replace
+
+    return replace(
+        event,
+        tf_dynamical=NOT_COUNTED_TF_DYNAMICAL_K,
+        tf_wind=NOT_COUNTED_TF_WIND_K,
+    )

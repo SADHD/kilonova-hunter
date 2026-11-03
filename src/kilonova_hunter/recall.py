@@ -201,7 +201,11 @@ class PopulationSettings:
         kappa_dynamical: Opacity of the dynamical (redder) ejecta.
         kappa_wind: Opacity of the disk wind (bluer ejecta).
         tf_dynamical: Temperature floor of the dynamical ejecta, in kelvin.
-        tf_wind: Temperature floor of the disk wind, in kelvin.
+            2500 K is redback's default for this component. It is kept.
+        tf_wind: Temperature floor of the disk wind, in kelvin. 5000 K
+            is redback's default for this component. It is kept. A
+            separate NOT-COUNTED run uses 3745 K and 1308 K instead.
+            That run is not this population.
     """
 
     count: int = 200
@@ -219,6 +223,7 @@ class PopulationSettings:
     vej_wind: float = 0.10
     kappa_dynamical: float = 10.0
     kappa_wind: float = 0.5
+    # redback defaults. Kept on purpose. Not the Villar table floors.
     tf_dynamical: float = 2500.0
     tf_wind: float = 5000.0
 
@@ -919,6 +924,8 @@ def redback_magnitudes(
         two_component_kilonova_model,
     )
 
+    from kilonova_hunter.redback_fix import corrected_diffusion
+
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
     shared = {
         "bands": sn_bands,
@@ -926,41 +933,42 @@ def redback_magnitudes(
         "cosmology": Planck18,
     }
     time_array = np.asarray(times, dtype=float)
-    if event.kind == "at2017gfo":
-        # Red component first, then blue. The order matches the
-        # population model, where component 1 is the redder dynamical
-        # ejecta and component 2 is the bluer wind. The numbers are the
-        # Villar et al. 2017 two-component best fit.
-        raw = two_component_kilonova_model(
-            time_array,
-            event.redshift,
-            0.050,
-            0.149,
-            1151.0,
-            3.65,
-            0.023,
-            0.256,
-            3983.0,
-            0.5,
-            **shared,
-        )
-    else:
-        raw = two_component_bns_ejecta_relation(
-            time_array,
-            event.redshift,
-            event.mass_1,
-            event.mass_2,
-            event.lambda_1,
-            event.lambda_2,
-            event.mtov,
-            event.zeta,
-            event.vej_wind,
-            event.kappa_dynamical,
-            event.kappa_wind,
-            event.tf_dynamical,
-            event.tf_wind,
-            **shared,
-        )
+    with corrected_diffusion():
+        if event.kind == "at2017gfo":
+            # Red component first, then blue. The order matches the
+            # population model, where component 1 is the redder dynamical
+            # ejecta and component 2 is the bluer wind. The numbers are the
+            # Villar et al. 2017 two-component best fit.
+            raw = two_component_kilonova_model(
+                time_array,
+                event.redshift,
+                0.050,
+                0.149,
+                1151.0,
+                3.65,
+                0.023,
+                0.256,
+                3983.0,
+                0.5,
+                **shared,
+            )
+        else:
+            raw = two_component_bns_ejecta_relation(
+                time_array,
+                event.redshift,
+                event.mass_1,
+                event.mass_2,
+                event.lambda_1,
+                event.lambda_2,
+                event.mtov,
+                event.zeta,
+                event.vej_wind,
+                event.kappa_dynamical,
+                event.kappa_wind,
+                event.tf_dynamical,
+                event.tf_wind,
+                **shared,
+            )
     dust = np.array([dust_dimming_mag(str(band), event.ebv) for band in bands])
     return np.asarray(raw, dtype=float) + dust
 

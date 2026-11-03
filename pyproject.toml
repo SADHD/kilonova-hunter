@@ -25,9 +25,10 @@ kilohunt = "kilonova_hunter.cli:main"
 # Left out of the default install so tests and CI stay light.
 sim = [
     "dustmaps>=1.0.14",
-    # 1.20.0 is the version the recall numbers in the pull request were
-    # computed with. Older releases are not checked.
-    "redback>=1.20.0",
+    # 1.20.0 is the version the diffusion wrapper was written for.
+    # A newer redback may already include the missing factor of 2, and
+    # the wrapper would apply it twice. Older releases are not checked.
+    "redback==1.20.0",
 ]
 
 [dependency-groups]
