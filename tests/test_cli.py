@@ -5,6 +5,7 @@ runs. The test then does not need the shell to find a ``kilohunt`` program
 on ``PATH``.
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -338,3 +339,128 @@ def _slow_fading_curve() -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def _frozen_cuts(path: Path, *, frozen: bool) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "frozen": frozen,
+                "redder_than_g_minus_r": 0.0,
+                "min_g_minus_r_rise": 0.1,
+                "reddening_window_days": 2.0,
+                "min_color_separation_days": 0.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_score_test_refuses_an_existing_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A second score is refused before it can read the cache."""
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "test_score.md").write_text("already scored\n", encoding="utf-8")
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(tmp_path / "cache"),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "already exists" in capsys.readouterr().err
+    assert not (tmp_path / "cache").exists()
+
+
+def test_score_test_requires_frozen_cuts_and_the_named_cache(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unfrozen cuts are refused, and the cache path is the one --cache named."""
+    output = tmp_path / "results"
+    output.mkdir()
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=False)
+    cache = tmp_path / "not-the-default-cache"
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "frozen" in capsys.readouterr().err
+    assert not (output / "test_score.md").exists()
+
+    _frozen_cuts(cuts, frozen=True)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    error = capsys.readouterr().err
+    assert str(cache) in error
+    assert "does not simulate" in error
+
+
+def test_score_test_requires_sfd_provenance_on_the_manifest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A cache that does not name the SFD map cannot score the test set."""
+    output = tmp_path / "results"
+    output.mkdir()
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    for population in ("2017-like", "realistic"):
+        folder = cache / population / "test"
+        folder.mkdir(parents=True)
+        (folder / "events.csv").write_text("object_id\n", encoding="utf-8")
+        (folder / "light_curves.csv").write_text(
+            "object_id,time_days,filter,magnitude,magnitude_error\n",
+            encoding="utf-8",
+        )
+        (folder / "manifest.json").write_text(
+            json.dumps({"status": "ready", "dust_mode": "sfd"}),
+            encoding="utf-8",
+        )
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "SFD provenance" in capsys.readouterr().err
+    assert not (output / "test_score.md").exists()

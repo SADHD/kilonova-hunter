@@ -343,17 +343,31 @@ def _run_fetch_alerts(output: Path, start: str, stop: str) -> None:
 
 
 def _run_score_test(args) -> None:
-    """Score the cached test split once. Refuses to simulate or to retune."""
+    """Score the cached test split once. Refuses to simulate or to retune.
+
+    The command stops unless three things are true: no test score has
+    been written yet, the cuts file says it is frozen, and the cache
+    manifest names the SFD dust map. ``--cache`` chooses the cache.
+    """
     import json
 
     from kilonova_hunter.grid import format_test_score, score_with_frozen_cuts
     from kilonova_hunter.sample import LIKE_KIND, REALISTIC, _read_cache
+    from kilonova_hunter.sky import dust_map_label
 
+    destination = args.output / "test_score.md"
+    if destination.is_file():
+        _fail(
+            f"{destination} already exists. The test set is scored once. "
+            "Do not score it again."
+        )
     if args.cuts is None:
         _fail("--score-test needs --cuts pointing at a JSON file of frozen cuts.")
     if not args.cuts.is_file():
         _fail(f"--cuts file does not exist: {args.cuts}")
     cuts = json.loads(args.cuts.read_text(encoding="utf-8"))
+    if cuts.get("frozen") is not True:
+        _fail('The cuts file must contain "frozen": true.')
     needed = (
         "redder_than_g_minus_r",
         "min_g_minus_r_rise",
@@ -364,13 +378,15 @@ def _run_score_test(args) -> None:
     if missing:
         _fail(f"--cuts is missing {', '.join(missing)}.")
     combo = {name: float(cuts[name]) for name in needed}
-    cache = Path("data") / "recall" / "cache"
+    cache = Path(args.cache)
+    expected_map = dust_map_label()
     by_population = {}
     for population in (LIKE_KIND, REALISTIC):
-        loaded = _read_cache(cache / population / "test")
+        folder = cache / population / "test"
+        loaded = _read_cache(folder)
         if loaded is None:
             _fail(
-                f"No cached test split for {population}. "
+                f"No cached test split for {population} in {cache}. "
                 "Simulate it before scoring. This command does not simulate."
             )
         manifest, events, curves = loaded
@@ -378,6 +394,12 @@ def _run_score_test(args) -> None:
             _fail(
                 f"The {population} test cache is incomplete. "
                 "Finish the simulation first."
+            )
+        if manifest.get("dust_map") != expected_map:
+            _fail(
+                f"The {population} test cache has no recorded SFD provenance. "
+                f"dust_map is {manifest.get('dust_map')!r}. "
+                f"It has to be {expected_map!r}."
             )
         by_population[population] = score_with_frozen_cuts(
             events,
@@ -388,14 +410,9 @@ def _run_score_test(args) -> None:
         )
     text = format_test_score(
         by_population,
-        dry_run=any(
-            (_read_cache(cache / population / "test") or ({},))[0].get("dust_mode")
-            != "sfd"
-            for population in (LIKE_KIND, REALISTIC)
-        ),
+        dry_run=False,
         provisional=bool(cuts.get("provisional", False)),
     )
-    destination = args.output / "test_score.md"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")
     print(text)
