@@ -62,7 +62,11 @@ def test_constant_heating_reaches_the_arnett_curve() -> None:
     expected.update(early)
     for time_over_td, target in expected.items():
         found = _ratio_at(times, ratio, time_over_td)
-        assert found == pytest.approx(target, abs=0.005)
+        # Relative, so t/t_d = 0.1 (about 0.01) is not compared with an
+        # absolute 0.005 that would also accept half the right answer.
+        assert found == pytest.approx(target, rel=0.02)
+        half = target / 2.0
+        assert half != pytest.approx(target, rel=0.02)
 
 
 def test_diffusion_time_is_not_doubled() -> None:
