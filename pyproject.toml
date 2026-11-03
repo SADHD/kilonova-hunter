@@ -43,11 +43,18 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: calls the real light-curve model and is expected to take longer",
+]
 
 [tool.ruff]
 line-length = 88
 target-version = "py312"
 src = ["src", "tests", "notebooks"]
+# The MOSFiT comparison keeps the line-by-line formulas in the form they
+# were checked. pip mosfit does not build on Python 3.10+, and these
+# scripts are not part of the harness style.
+extend-exclude = ["checks/mosfit"]
 
 [tool.ruff.lint]
 # E and F catch real mistakes. I sorts imports. UP modernizes syntax.

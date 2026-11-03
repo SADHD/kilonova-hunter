@@ -1,0 +1,25 @@
+blue exact quad: 3.825e+41 4.722e+41 4.991e+41 4.677e+41 3.151e+41 5.215e+40
+  first dense=0.1 d, t=0 point=True:  ratio to exact 561435.336 412258.337 306827.895 262411.373 180588.525 17211.296
+  first dense=0.1 d, t=0 point=False:  ratio to exact 0.647 0.741 0.807 0.835 0.887 0.989
+  first dense=0.01 d, t=0 point=True:  ratio to exact 5606.613 4115.776 3063.404 2620.405 1803.628 172.787
+  first dense=0.01 d, t=0 point=False:  ratio to exact 0.898 0.925 0.944 0.952 0.967 0.997
+  first dense=0.001 d, t=0 point=True:  ratio to exact 57.004 42.107 31.595 27.171 19.010 2.716
+  first dense=0.001 d, t=0 point=False:  ratio to exact 0.949 0.963 0.972 0.976 0.984 0.999
+  first dense=0.0001 d, t=0 point=True:  ratio to exact 1.521 1.382 1.284 1.243 1.166 1.015
+  first dense=0.0001 d, t=0 point=False:  ratio to exact 0.961 0.971 0.978 0.982 0.987 0.999
+  first dense=1e-06 d, t=0 point=True:  ratio to exact 1.000 1.000 1.000 0.999 0.989 0.999
+  first dense=1e-06 d, t=0 point=False:  ratio to exact 1.000 1.000 1.000 0.999 0.989 0.999
+  first dense=1e-08 d, t=0 point=True:  ratio to exact 1.000 1.000 1.000 0.999 0.989 0.999
+  first dense=1e-08 d, t=0 point=False:  ratio to exact 1.000 1.000 1.000 0.999 0.989 0.999
+blue redback abd (np.float64(1.6216), np.float64(0.24280000000000002), np.float64(1.2045)) mosfit abd 1.6216 0.24280000000000002 1.2045
+   Q(0.3) redback=2.0958e+42 mosfit=2.0958e+42
+   Q(1.0) redback=2.8408e+41 mosfit=2.8408e+41
+   Q(5.0) redback=1.5150e+40 mosfit=1.5150e+40
+purple redback abd (np.float64(0.45568000000000003), np.float64(0.12124000000000001), np.float64(0.77001)) mosfit abd 0.45568000000000003 0.12124000000000001 0.77001
+   Q(0.3) redback=5.7617e+42 mosfit=5.7617e+42
+   Q(1.0) redback=1.0082e+42 mosfit=1.0082e+42
+   Q(5.0) redback=6.7434e+40 mosfit=6.7434e+40
+red redback abd (np.float64(0.8259025000000001), np.float64(0.1829575), np.float64(0.8799674999999999)) mosfit abd 0.8259025000000001 0.1829575 0.8799674999999999
+   Q(0.3) redback=1.2709e+42 mosfit=1.2709e+42
+   Q(1.0) redback=1.9903e+41 mosfit=1.9903e+41
+   Q(5.0) redback=1.1915e+40 mosfit=1.1915e+40

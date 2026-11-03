@@ -1,45 +1,35 @@
-"""Record the external wrapped-redback versus MOSFiT check.
+"""Write docs/mosfit_external_check.csv from the MOSFiT side-by-side.
 
-pip mosfit does not build on Python 3.10 or newer, so this repository
-does not run MOSFiT. The numbers below were measured outside this
-environment, against a line-by-line reimplementation of the modules in
-MOSFiT commit 6595248. redback is about 2 percent brighter, from its
-own diffusion integral. From 0.5 days on, every difference is inside
-0.1 mag, which is the bar that blocks a grid rerun.
-
-This script only writes that record. It does not call MOSFiT.
+The numbers are computed by checks/mosfit/band_sidebyside.py. This
+script does not type them in. pip mosfit does not build on Python 3.10
+or newer, so the comparison uses the reimplementation in that folder.
 
     uv run python scripts/record_mosfit_external_check.py
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-OUTPUT = Path("docs/mosfit_external_check.csv")
-
-# max |wrapped redback − MOSFiT reimplementation|, magnitudes, from 0.5 d.
-ROWS = (
-    ("g", 0.028),
-    ("r", 0.023),
-    ("i", 0.020),
-    ("bolometric", 0.030),
-)
-LIMIT_MAG = 0.1
-SOURCE = "external check against MOSFiT commit 6595248"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
-    lines = ["quantity,max_abs_difference_mag,limit_mag,passes,source"]
-    for name, difference in ROWS:
-        passed = "yes" if difference <= LIMIT_MAG else "no"
-        lines.append(f"{name},{difference},{LIMIT_MAG},{passed},{SOURCE}")
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"wrote {OUTPUT}")
+    sys.path.insert(0, str(ROOT / "checks" / "mosfit"))
+    import bootstrap
+
+    bootstrap.install()
+    import band_sidebyside
+
+    path, rows = band_sidebyside.write_external_check(
+        ROOT / "docs" / "mosfit_external_check.csv"
+    )
+    print(f"wrote {path}")
     print(
-        "External check only. redback is about 2% brighter "
-        "from its own diffusion integral. The 0.1 mag bar passes."
+        "max |wrapped redback - MOSFiT| from 0.5 d: "
+        f"g {rows['g']:.3f}, r {rows['r']:.3f}, i {rows['i']:.3f}, "
+        f"bolometric {rows['bolometric']:.3f} mag"
     )
 
 

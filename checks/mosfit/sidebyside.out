@@ -1,0 +1,67 @@
+11:01 redback WARNING : No module named 'lalsimulation'
+11:01 redback WARNING : lalsimulation is not installed. Some EOS based models will not work. Please use bilby eos or pass your own EOS generation class to the model
+11:01 bilby INFO    : Running bilby version: 2.8.2
+11:01 redback INFO    : Running redback version: 1.20.0
+redback grid: n=298, first=0.01 s, n<1d=132, n<0.5d=100, n<0.3d=76
+grid points (d) between 0.05 and 1 d: [0.0575, 0.0791, 0.1089, 0.15, 0.1533, 0.1567, 0.1601, 0.1636, 0.1672, 0.1709, 0.1746, 0.1784, 0.1824, 0.1864, 0.1904, 0.1946, 0.1989, 0.2033, 0.2077, 0.2123, 0.2169, 0.2217, 0.2266, 0.2315, 0.2366, 0.2418, 0.2471, 0.2525, 0.2581, 0.2637, 0.2695, 0.2754, 0.2815, 0.2877, 0.294, 0.3004, 0.307, 0.3137, 0.3206, 0.3277, 0.3349, 0.3422, 0.3497, 0.3574, 0.3652, 0.3732, 0.3814, 0.3898, 0.3983, 0.4071, 0.416, 0.4251, 0.4345, 0.444, 0.4538, 0.4637, 0.4739, 0.4843, 0.4949, 0.5058, 0.5169, 0.5282, 0.5398, 0.5516, 0.5637, 0.5761, 0.5887, 0.6017, 0.6149, 0.6284, 0.6421, 0.6562, 0.6706, 0.6853, 0.7004, 0.7158, 0.7315, 0.7475, 0.7639, 0.7807, 0.7978, 0.8153, 0.8332, 0.8515, 0.8702, 0.8893, 0.9088, 0.9287, 0.9491, 0.9699, 0.9912]
+
+blue: t_d = 1.275 d
+  t= 0.3 d  rb_x2=3.842e+41  mosfit=5.815e+41  quad=3.825e+41  rb_x2/mosfit=0.6607
+  t= 0.5 d  rb_x2=4.738e+41  mosfit=6.525e+41  quad=4.722e+41  rb_x2/mosfit=0.7261
+  t= 0.8 d  rb_x2=5.003e+41  mosfit=6.408e+41  quad=4.991e+41  rb_x2/mosfit=0.7807
+  t= 1.0 d  rb_x2=4.687e+41  mosfit=5.812e+41  quad=4.677e+41  rb_x2/mosfit=0.8064
+  t= 1.5 d  rb_x2=3.156e+41  mosfit=3.675e+41  quad=3.151e+41  rb_x2/mosfit=0.8589
+  t= 3.0 d  rb_x2=5.230e+40  mosfit=5.293e+40  quad=5.215e+40  rb_x2/mosfit=0.9881
+  t= 5.0 d  rb_x2=1.673e+40  mosfit=1.622e+40  quad=1.622e+40  rb_x2/mosfit=1.0315
+  t= 7.0 d  rb_x2=9.280e+39  mosfit=8.235e+39  quad=8.234e+39  rb_x2/mosfit=1.1269
+
+purple: t_d = 6.335 d
+  t= 0.3 d  rb_x2=4.048e+40  mosfit=6.015e+40  quad=4.030e+40  rb_x2/mosfit=0.6730
+  t= 0.5 d  rb_x2=5.574e+40  mosfit=7.480e+40  quad=5.556e+40  rb_x2/mosfit=0.7452
+  t= 0.8 d  rb_x2=7.387e+40  mosfit=9.065e+40  quad=7.370e+40  rb_x2/mosfit=0.8149
+  t= 1.0 d  rb_x2=8.379e+40  mosfit=9.782e+40  quad=8.362e+40  rb_x2/mosfit=0.8566
+  t= 1.5 d  rb_x2=1.031e+41  mosfit=1.044e+41  quad=1.030e+41  rb_x2/mosfit=0.9876
+  t= 3.0 d  rb_x2=1.294e+41  mosfit=1.280e+41  quad=1.292e+41  rb_x2/mosfit=1.0110
+  t= 5.0 d  rb_x2=1.192e+41  mosfit=1.182e+41  quad=1.191e+41  rb_x2/mosfit=1.0083
+  t= 7.0 d  rb_x2=8.718e+40  mosfit=8.661e+40  quad=8.712e+40  rb_x2/mosfit=1.0065
+
+red: t_d = 5.894 d
+  t= 0.3 d  rb_x2=1.070e+40  mosfit=1.602e+40  quad=1.065e+40  rb_x2/mosfit=0.6677
+  t= 0.5 d  rb_x2=1.451e+40  mosfit=1.969e+40  quad=1.446e+40  rb_x2/mosfit=0.7367
+  t= 0.8 d  rb_x2=1.882e+40  mosfit=2.350e+40  quad=1.878e+40  rb_x2/mosfit=0.8011
+  t= 1.0 d  rb_x2=2.107e+40  mosfit=2.513e+40  quad=2.103e+40  rb_x2/mosfit=0.8385
+  t= 1.5 d  rb_x2=2.518e+40  mosfit=2.644e+40  quad=2.513e+40  rb_x2/mosfit=0.9524
+  t= 3.0 d  rb_x2=2.937e+40  mosfit=2.900e+40  quad=2.933e+40  rb_x2/mosfit=1.0127
+  t= 5.0 d  rb_x2=2.487e+40  mosfit=2.463e+40  quad=2.484e+40  rb_x2/mosfit=1.0098
+  t= 7.0 d  rb_x2=1.671e+40  mosfit=1.659e+40  quad=1.670e+40  rb_x2/mosfit=1.0076
+
+TOTAL (erg/s)  t  rb_raw  rb_x2  mosfit  mosfit(kg=10)  quad  | rb_x2/mosfit  dmag
+   0.3  2.177e+41  4.354e+41  6.577e+41  6.577e+41  4.334e+41  | 0.6620  +0.448
+   0.5  2.720e+41  5.440e+41  7.470e+41  7.470e+41  5.422e+41  | 0.7283  +0.344
+   0.8  2.965e+41  5.930e+41  7.550e+41  7.550e+41  5.915e+41  | 0.7855  +0.262
+   1.0  2.868e+41  5.735e+41  7.041e+41  7.041e+41  5.723e+41  | 0.8145  +0.223
+   1.5  2.220e+41  4.440e+41  4.984e+41  4.984e+41  4.432e+41  | 0.8908  +0.126
+   3.0  1.055e+41  2.111e+41  2.099e+41  2.099e+41  2.107e+41  | 1.0055  -0.006
+   5.0  8.039e+40  1.608e+41  1.590e+41  1.590e+41  1.602e+41  | 1.0109  -0.012
+   7.0  5.659e+40  1.132e+41  1.114e+41  1.113e+41  1.121e+41  | 1.0156  -0.017
+
+Waxman L_int ratios: t  raw/W  x2/W  mosfit/W   (PR table: 0.082 0.072 0.207 0.337 0.474 0.657 0.839 0.948 1.116 1.269 1.461 1.693)
+   0.5  0.347  0.695  0.955
+   0.6  0.339  0.678  0.904
+   0.8  0.405  0.810  1.033
+   1.0  0.466  0.932  1.145
+   1.2  0.532  1.064  1.264
+   1.5  0.601  1.202  1.351
+   2.5  0.500  1.001  1.011
+   3.5  0.520  1.040  1.031
+   4.5  0.589  1.177  1.166
+   5.5  0.642  1.284  1.270
+   6.5  0.706  1.412  1.395
+   7.5  0.777  1.555  1.531
+
+constant-Q, redback integrator x2, blue t_d, on the redback grid:
+  t/t_d=0.10 (t=0.128 d)  got=0.00995  analytic=0.00995  ratio=1.0000
+  t/t_d=0.25 (t=0.319 d)  got=0.06059  analytic=0.06059  ratio=1.0001
+  t/t_d=0.50 (t=0.638 d)  got=0.22121  analytic=0.22120  ratio=1.0001
+  t/t_d=1.00 (t=1.275 d)  got=0.63222  analytic=0.63212  ratio=1.0002
+  t/t_d=2.00 (t=2.551 d)  got=0.98379  analytic=0.98168  ratio=1.0021
