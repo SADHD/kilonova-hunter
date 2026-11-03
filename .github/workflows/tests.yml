@@ -75,6 +75,9 @@ jobs:
         # Each checks/mosfit script that has a saved .out is run again.
         # stdout is the result table. Library logs stay on stderr, and the
         # bandpasses are in the repo, so a fresh runner does not download
-        # them. A number may move by float noise. Any other stdout change
-        # fails the job.
+        # them. A number may move by one unit in its last printed decimal.
+        # Any other stdout change fails the job.
         run: uv run python scripts/diff_mosfit_outputs.py
+
+      - name: The external-check CSV is unchanged by that rerun
+        run: git diff --exit-code docs/mosfit_external_check.csv

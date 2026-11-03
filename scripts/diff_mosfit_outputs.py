@@ -2,7 +2,9 @@
 
 Library logs and warnings go to stderr and are not part of the comparison.
 The bandpasses are in the repository, so sncosmo does not download them.
-Numbers may differ by float noise. Any other stdout difference fails.
+A number may differ by one unit in the last printed decimal of the
+reference value. Numbers with no printed fraction use an absolute
+tolerance of 1e-3. Any other stdout difference fails.
 """
 
 from __future__ import annotations
@@ -14,11 +16,34 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = ROOT / "checks" / "mosfit"
-# A last-digit change in a value printed to about three significant
-# figures. Integers, which are counts, are compared exactly.
-RELATIVE_TOLERANCE = 1e-3
-ABSOLUTE_TOLERANCE = 1e-4
+# Used when the reference token has no digits after the decimal point.
+_ABSOLUTE_FALLBACK = 1e-3
 _NUMBER = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
+_EXPECTED_SCRIPTS = (
+    "band_sidebyside.py",
+    "dense_test.py",
+    "gr_gap.py",
+    "harness_sparse_check.py",
+    "late_blue.py",
+    "mosfit_grid.py",
+    "reproduce_pr_table.py",
+    "sidebyside.py",
+    "temperature.py",
+)
+
+
+def _printed_unit(reference: str) -> float:
+    """One unit in the last printed decimal, or 1e-3 when there is none."""
+    token = reference.strip()
+    if token[:1] in "+-":
+        token = token[1:]
+    mantissa, separator, exponent = token.lower().partition("e")
+    power = int(exponent) if separator else 0
+    if "." in mantissa:
+        fraction = mantissa.split(".", 1)[1]
+        if fraction:
+            return 10 ** (-len(fraction) + power)
+    return _ABSOLUTE_FALLBACK
 
 
 def _same_number(found: str, expected: str) -> bool:
@@ -26,7 +51,7 @@ def _same_number(found: str, expected: str) -> bool:
         return found.lstrip("+") == expected.lstrip("+")
     left = float(found)
     right = float(expected)
-    return abs(left - right) <= ABSOLUTE_TOLERANCE + RELATIVE_TOLERANCE * abs(right)
+    return abs(left - right) <= _printed_unit(expected)
 
 
 def _integer(token: str) -> bool:
@@ -74,9 +99,17 @@ def compare(found: str, expected: str) -> list[str]:
 
 
 def _scripts() -> list[Path]:
-    return sorted(
-        path for path in CHECKS.glob("*.py") if path.with_suffix(".out").is_file()
+    """The nine committed checks. Each one has to have its .out file."""
+    missing = [
+        name
+        for name in _EXPECTED_SCRIPTS
+        if not (CHECKS / name).is_file()
+        or not (CHECKS / name).with_suffix(".out").is_file()
+    ]
+    assert not missing, "checks/mosfit is missing a script or its .out: " + ", ".join(
+        missing
     )
+    return [CHECKS / name for name in _EXPECTED_SCRIPTS]
 
 
 def main() -> int:
