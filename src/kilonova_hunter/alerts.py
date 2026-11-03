@@ -206,7 +206,24 @@ def build_slice_document(
         ),
         "tuning": slice_summary(alerts, tuning),
         "test": slice_summary(alerts, test),
+        "flag_columns": ["n_flagged", "n_repeat_flags"],
+        "flag_counts": {
+            "tuning": _slice_flag_counts(alerts, tuning),
+            "test": _slice_flag_counts(alerts, test),
+        },
     }
+
+
+def _slice_flag_counts(alerts: pd.DataFrame, nights: list[int]) -> dict:
+    """New-candidate flags and repeat flags for one slice.
+
+    Repeats are their own column. A night with no new alert for an
+    object adds nothing to either column.
+    """
+    if alerts.empty or not nights:
+        return average_flags_per_night(alerts.iloc[0:0])
+    chosen = alerts.loc[alerts["night"].isin(nights)]
+    return average_flags_per_night(chosen)
 
 
 def write_slice_document(document: dict, path: Path) -> None:
@@ -253,12 +270,14 @@ def average_flags_per_night(
     Each night is scored with only the alerts from that night and from
     earlier nights. An alert from a later night is not visible yet.
 
-    A candidate counts on the first night it qualifies. ``n_flagged``
-    is the number of those first flags, and ``flags_per_night`` is that
-    number divided by the number of nights. The N = 10 per night limit
-    uses this new-candidate rate. A later night that still flags the
-    same object goes into ``n_repeat_flags`` and does not add to the
-    limit.
+    A flag counts only when a new alert on that night is what makes the
+    object a candidate, or arrives while it is already a candidate.
+    ``n_flagged`` is the first such night for each object.
+    ``flags_per_night`` is that count divided by the number of nights.
+    The N = 10 per night limit uses this new-candidate rate. A later
+    night counts as a repeat only when that object has another new
+    alert that night. A night with no new alert for the object counts
+    nothing, not even as a repeat.
 
     This is the plumbing the contamination limit will use. It is not
     applied to the grid until the team says to apply it.
@@ -284,12 +303,20 @@ def average_flags_per_night(
     n_new = 0
     n_repeat = 0
     for night in ordered:
+        tonight = working.loc[working["night"] == night]
+        arrived = set(tonight["i:objectId"].astype(str))
+        if not arrived:
+            continue
         seen = working.loc[working["night"] <= night]
         flagged = _flagged_object_ids(seen, settings)
-        new_ids = [object_id for object_id in flagged if object_id not in already]
-        n_new += len(new_ids)
-        n_repeat += len(flagged) - len(new_ids)
-        already.update(new_ids)
+        for object_id in flagged:
+            if object_id not in arrived:
+                continue
+            if object_id not in already:
+                n_new += 1
+                already.add(object_id)
+            else:
+                n_repeat += 1
     nights = len(ordered)
     return {
         "n_nights": nights,

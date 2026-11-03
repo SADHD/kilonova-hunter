@@ -88,12 +88,12 @@ def test_ztf_night_changes_at_20_utc_and_slices_do_not_share_nights() -> None:
 
 
 def test_flags_per_night_counts_a_candidate_on_its_first_night_only() -> None:
-    """A repeat flag on a later night is not a new candidate.
+    """A night with no new alert for the object counts nothing.
 
     The whole passing curve is on night 1, so the object is new that
-    night. Night 2 still sees it and adds a different object that is
-    not a candidate. ``n_flagged`` stays 1. The second night is a
-    repeat, in its own column. The N = 10 limit uses the new count.
+    night. Night 2 adds a different object and no new alert for the
+    candidate. That night is not a repeat. The N = 10 limit uses the
+    new-candidate count.
     """
     from kilonova_hunter.inject import simulate_kilonova_light_curve
 
@@ -127,9 +127,45 @@ def test_flags_per_night_counts_a_candidate_on_its_first_night_only() -> None:
     summary = average_flags_per_night(pd.DataFrame(rows))
     assert summary["n_nights"] == 2
     assert summary["n_flagged"] == 1
-    assert summary["n_repeat_flags"] == 1
+    assert summary["n_repeat_flags"] == 0
     assert summary["flags_per_night"] == pytest.approx(0.5)
-    assert summary["repeat_flags_per_night"] == pytest.approx(0.5)
+    assert summary["repeat_flags_per_night"] == pytest.approx(0.0)
+
+
+def test_a_new_alert_on_a_later_night_is_a_repeat() -> None:
+    """A new alert that night, on an object already flagged, is a repeat."""
+    from kilonova_hunter.inject import simulate_kilonova_light_curve
+
+    demo = simulate_kilonova_light_curve(noise_mag=0.0)
+    demo = demo.loc[demo["time_days"] <= 3.0]
+    rows = []
+    for point in demo.itertuples(index=False):
+        band = {"g": 1, "r": 2}[point.filter]
+        rows.append(
+            {
+                "i:objectId": "good",
+                "i:jd": 2450000.0 + point.time_days,
+                "i:fid": band,
+                "i:magpsf": point.magnitude,
+                "i:sigmapsf": 0.02,
+                "mjd": 50000.0 + point.time_days,
+                "night": 1,
+            }
+        )
+    rows.append(
+        {
+            "i:objectId": "good",
+            "i:jd": 2450001.2,
+            "i:fid": 1,
+            "i:magpsf": 19.0,
+            "i:sigmapsf": 0.02,
+            "mjd": 50001.2,
+            "night": 2,
+        }
+    )
+    summary = average_flags_per_night(pd.DataFrame(rows))
+    assert summary["n_flagged"] == 1
+    assert summary["n_repeat_flags"] == 1
 
 
 def test_flags_per_night_hides_alerts_from_later_nights() -> None:
