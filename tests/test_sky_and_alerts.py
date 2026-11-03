@@ -90,10 +90,13 @@ def test_ztf_night_changes_at_20_utc_and_slices_do_not_share_nights() -> None:
 
 
 def test_flags_per_night_counts_objects_not_rows() -> None:
-    """Two alerts of one candidate on two nights are one flag, averaged over nights."""
-    # A curve the placeholder cuts accept: the noise-free demo, placed
-    # on two nights as if it were two alerts of one object. Easier to
-    # build a tiny table the filter rejects, and one it accepts.
+    """A candidate stays a candidate on the next night, so it counts twice.
+
+    The whole passing curve is on night 1. Night 2 adds a different
+    object that is not a candidate. The nightly counts are 1 and 1,
+    so the average is 1. Two alerts of the good object are still one
+    object, not two.
+    """
     from kilonova_hunter.inject import simulate_kilonova_light_curve
 
     demo = simulate_kilonova_light_curve(noise_mag=0.0)
@@ -123,6 +126,32 @@ def test_flags_per_night_counts_objects_not_rows() -> None:
             "night": 2,
         }
     )
+    summary = average_flags_per_night(pd.DataFrame(rows))
+    assert summary["n_nights"] == 2
+    assert summary["n_flagged"] == 2
+    assert summary["flags_per_night"] == pytest.approx(1.0)
+
+
+def test_flags_per_night_hides_alerts_from_later_nights() -> None:
+    """Night 1 does not get to see the alerts that arrive on night 2."""
+    from kilonova_hunter.inject import simulate_kilonova_light_curve
+
+    demo = simulate_kilonova_light_curve(noise_mag=0.0)
+    demo = demo.loc[demo["time_days"] <= 3.0].reset_index(drop=True)
+    rows = []
+    for index, point in enumerate(demo.itertuples(index=False)):
+        band = {"g": 1, "r": 2}[point.filter]
+        rows.append(
+            {
+                "i:objectId": "late",
+                "i:jd": 2450000.0 + point.time_days,
+                "i:fid": band,
+                "i:magpsf": point.magnitude,
+                "i:sigmapsf": 0.02,
+                "mjd": 50000.0 + float(point.time_days),
+                "night": 1 if index == 0 else 2,
+            }
+        )
     summary = average_flags_per_night(pd.DataFrame(rows))
     assert summary["n_nights"] == 2
     assert summary["n_flagged"] == 1
