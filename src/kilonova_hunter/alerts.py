@@ -248,21 +248,31 @@ def average_flags_per_night(
     alerts: pd.DataFrame,
     thresholds: Thresholds | None = None,
 ) -> dict:
-    """Average of the nightly candidate counts.
+    """New candidates per night, with later flags of the same object separate.
 
     Each night is scored with only the alerts from that night and from
-    earlier nights. An alert from a later night is not visible yet, so
-    an object is not flagged on a night before the points that make it
-    a candidate have arrived. The same object can count on more than
-    one night. ``n_flagged`` is the sum of those nightly counts, and
-    ``flags_per_night`` is that sum divided by the number of nights.
+    earlier nights. An alert from a later night is not visible yet.
+
+    A candidate counts on the first night it qualifies. ``n_flagged``
+    is the number of those first flags, and ``flags_per_night`` is that
+    number divided by the number of nights. The N = 10 per night limit
+    uses this new-candidate rate. A later night that still flags the
+    same object goes into ``n_repeat_flags`` and does not add to the
+    limit.
 
     This is the plumbing the contamination limit will use. It is not
     applied to the grid until the team says to apply it.
     """
     settings = resolve_thresholds(thresholds)
+    empty = {
+        "n_nights": 0,
+        "n_flagged": 0,
+        "n_repeat_flags": 0,
+        "flags_per_night": float("nan"),
+        "repeat_flags_per_night": float("nan"),
+    }
     if alerts.empty:
-        return {"n_nights": 0, "n_flagged": 0, "flags_per_night": float("nan")}
+        return empty
     working = alerts.copy()
     if "night" not in working.columns:
         mjd = working["mjd"] if "mjd" in working.columns else jd_to_mjd(working["i:jd"])
@@ -270,25 +280,33 @@ def average_flags_per_night(
     if "mjd" not in working.columns:
         working["mjd"] = jd_to_mjd(working["i:jd"].to_numpy(dtype=float))
     ordered = sorted(int(night) for night in working["night"].unique())
-    total = 0
+    already: set[str] = set()
+    n_new = 0
+    n_repeat = 0
     for night in ordered:
         seen = working.loc[working["night"] <= night]
-        total += _flagged_objects(seen, settings)
+        flagged = _flagged_object_ids(seen, settings)
+        new_ids = [object_id for object_id in flagged if object_id not in already]
+        n_new += len(new_ids)
+        n_repeat += len(flagged) - len(new_ids)
+        already.update(new_ids)
     nights = len(ordered)
     return {
         "n_nights": nights,
-        "n_flagged": int(total),
-        "flags_per_night": float(total / nights) if nights else float("nan"),
+        "n_flagged": int(n_new),
+        "n_repeat_flags": int(n_repeat),
+        "flags_per_night": float(n_new / nights) if nights else float("nan"),
+        "repeat_flags_per_night": float(n_repeat / nights) if nights else float("nan"),
     }
 
 
-def _flagged_objects(alerts: pd.DataFrame, settings: Thresholds) -> int:
-    """How many objects in this table are candidates right now."""
-    flagged = 0
-    for _object_id, group in alerts.groupby("i:objectId", sort=False):
+def _flagged_object_ids(alerts: pd.DataFrame, settings: Thresholds) -> list[str]:
+    """Object ids that are candidates with the alerts available so far."""
+    flagged: list[str] = []
+    for object_id, group in alerts.groupby("i:objectId", sort=False):
         curve = light_curve_from_alerts(group)
         if curve.empty:
             continue
         if is_kilonova_candidate(curve, settings).is_candidate:
-            flagged += 1
+            flagged.append(str(object_id))
     return flagged

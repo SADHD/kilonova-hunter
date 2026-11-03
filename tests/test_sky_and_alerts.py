@@ -87,13 +87,13 @@ def test_ztf_night_changes_at_20_utc_and_slices_do_not_share_nights() -> None:
     assert test == [6, 8]
 
 
-def test_flags_per_night_counts_objects_not_rows() -> None:
-    """A candidate stays a candidate on the next night, so it counts twice.
+def test_flags_per_night_counts_a_candidate_on_its_first_night_only() -> None:
+    """A repeat flag on a later night is not a new candidate.
 
-    The whole passing curve is on night 1. Night 2 adds a different
-    object that is not a candidate. The nightly counts are 1 and 1,
-    so the average is 1. Two alerts of the good object are still one
-    object, not two.
+    The whole passing curve is on night 1, so the object is new that
+    night. Night 2 still sees it and adds a different object that is
+    not a candidate. ``n_flagged`` stays 1. The second night is a
+    repeat, in its own column. The N = 10 limit uses the new count.
     """
     from kilonova_hunter.inject import simulate_kilonova_light_curve
 
@@ -126,8 +126,10 @@ def test_flags_per_night_counts_objects_not_rows() -> None:
     )
     summary = average_flags_per_night(pd.DataFrame(rows))
     assert summary["n_nights"] == 2
-    assert summary["n_flagged"] == 2
-    assert summary["flags_per_night"] == pytest.approx(1.0)
+    assert summary["n_flagged"] == 1
+    assert summary["n_repeat_flags"] == 1
+    assert summary["flags_per_night"] == pytest.approx(0.5)
+    assert summary["repeat_flags_per_night"] == pytest.approx(0.5)
 
 
 def test_flags_per_night_hides_alerts_from_later_nights() -> None:
@@ -153,4 +155,5 @@ def test_flags_per_night_hides_alerts_from_later_nights() -> None:
     summary = average_flags_per_night(pd.DataFrame(rows))
     assert summary["n_nights"] == 2
     assert summary["n_flagged"] == 1
+    assert summary["n_repeat_flags"] == 0
     assert summary["flags_per_night"] == pytest.approx(0.5)
