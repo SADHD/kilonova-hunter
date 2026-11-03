@@ -271,6 +271,8 @@ def villar_magnitudes(
             output_format="magnitude",
             cosmology=Planck18,
         )
+    # This grid runs to 7e6 seconds, about 81 days. Day 7 is a real
+    # magnitude. The 6-day cap is only for the two-component model.
     dust = extinction_for_bands(event.ebv, bands)
     return np.asarray(raw, dtype=float) + dust
 
@@ -308,13 +310,15 @@ def realistic_magnitudes(
         two_component_bns_ejecta_relation,
     )
 
+    from kilonova_hunter.model_grid import nan_after_two_component_cap
     from kilonova_hunter.recall import _SNCOSMO_BANDS
     from kilonova_hunter.redback_fix import corrected_diffusion
 
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
+    time_array = np.asarray(times, dtype=float)
     with corrected_diffusion():
         raw = two_component_bns_ejecta_relation(
-            np.asarray(times, dtype=float),
+            time_array,
             event.redshift,
             event.mass_1,
             event.mass_2,
@@ -331,6 +335,9 @@ def realistic_magnitudes(
             output_format="magnitude",
             cosmology=Planck18,
         )
+    # The public function builds its own dense grid, then freezes the
+    # magnitude after source-frame day 6. Those later times are no model.
+    raw = nan_after_two_component_cap(time_array, raw, event.redshift)
     dust = extinction_for_bands(event.ebv, bands)
     return np.asarray(raw, dtype=float) + dust
 
@@ -345,6 +352,27 @@ NOT_COUNTED_TF_WIND_K = 674.0
 # redback's shipped prior draws each opacity uniformly from 1 to 30.
 NOT_COUNTED_KAPPA_MIN = 1.0
 NOT_COUNTED_KAPPA_MAX = 30.0
+
+
+def draw_opacity_prior(rng: np.random.Generator) -> tuple[float, float]:
+    """Two opacities from redback's Uniform(1, 30) prior.
+
+    The first is the dynamical ejecta and the second is the wind.
+    This draw is NOT-COUNTED. The recall keeps 10 and 0.5.
+    """
+    dynamical, wind = rng.uniform(NOT_COUNTED_KAPPA_MIN, NOT_COUNTED_KAPPA_MAX, size=2)
+    return float(dynamical), float(wind)
+
+
+def with_opacity_prior(event, rng: np.random.Generator):
+    """Copy one realistic event onto a Uniform(1, 30) opacity draw.
+
+    NOT-COUNTED. Do not put this copy into a recall or the tuning grid.
+    """
+    from dataclasses import replace
+
+    dynamical, wind = draw_opacity_prior(rng)
+    return replace(event, kappa_dynamical=dynamical, kappa_wind=wind)
 
 
 def not_counted_realistic_event(event):

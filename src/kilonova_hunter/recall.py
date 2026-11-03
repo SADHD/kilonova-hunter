@@ -944,6 +944,7 @@ def redback_magnitudes(
         two_component_kilonova_model,
     )
 
+    from kilonova_hunter.model_grid import nan_after_two_component_cap
     from kilonova_hunter.redback_fix import corrected_diffusion
 
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
@@ -989,6 +990,9 @@ def redback_magnitudes(
                 event.tf_wind,
                 **shared,
             )
+    # Both branches call the two-component model. It freezes after
+    # source-frame day 6. A later time is NaN, not that frozen magnitude.
+    raw = nan_after_two_component_cap(time_array, raw, event.redshift)
     dust = np.array([dust_dimming_mag(str(band), event.ebv) for band in bands])
     return np.asarray(raw, dtype=float) + dust
 
@@ -1578,6 +1582,13 @@ def run_recall(
     return text
 
 
+LEGACY_RECALL_LINE = (
+    "LEGACY. kilohunt recall without --grid is the older scorer. "
+    "It is not the official tuning grid, and its test-set number is "
+    "not the official result."
+)
+
+
 def format_recall_report(
     sets: list[tuple[RecallNumbers, pd.DataFrame]],
     *,
@@ -1586,9 +1597,14 @@ def format_recall_report(
     output_dir: Path,
     cadence: str = CADENCE_WFD,
 ) -> str:
-    """Turn the scores into the paragraphs ``kilohunt recall`` prints."""
+    """Turn the scores into the paragraphs ``kilohunt recall`` prints.
+
+    This report is the legacy path. ``kilohunt recall --grid`` is the
+    official tuning grid. This function is not that grid.
+    """
     by_name = {item.set_name: (item, events) for item, events in sets}
     lines: list[str] = []
+    lines.append(LEGACY_RECALL_LINE)
     lines.append(
         "Recall uses the placeholder cuts in config.py. They have not been tuned."
     )

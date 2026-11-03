@@ -117,8 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Rubin wide-fast-deep cadence (or --cadence simple), and count "
             "how many the v1 rules catch within 3 days of the merger. "
             "Those 3 days start at the merger, not at the first detection. "
-            "The official number is the test set. A tuning set is written "
-            "beside it so cuts can be tried without using the test set. "
+            "Without --grid this is the legacy scorer, not the official "
+            "tuning grid. The test-set number it prints is not the official "
+            "result. "
             "The cuts stay the placeholders in config.py. "
             "This needs redback, which is optional: uv sync --extra sim. "
             "The tables go under data/recall/, which git ignores."
@@ -431,6 +432,10 @@ def _run_score_test(args) -> None:
                 f"({expected_n!r} vs {len(events)} rows)."
             )
         loaded_sets.append((population, manifest, events, curves))
+    # Claim the once-only marker before any scoring. A crash during the
+    # score still leaves the marker, so a second run does not score again.
+    # Two processes cannot both create it: the create is exclusive.
+    _claim_score_once_marker(marker, combo)
     by_population = {}
     for population, manifest, events, curves in loaded_sets:
         by_population[population] = score_with_frozen_cuts(
@@ -447,7 +452,6 @@ def _run_score_test(args) -> None:
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")
-    _write_score_once_marker(marker, combo)
     print(text)
 
 
@@ -456,20 +460,32 @@ def _score_once_marker(cache: Path) -> Path:
     return Path(cache) / "test_scored_once.json"
 
 
-def _write_score_once_marker(path: Path, combo: dict[str, float]) -> None:
-    """Record the cuts hash so a later score, even in another folder, stops."""
+def _claim_score_once_marker(path: Path, combo: dict[str, float]) -> None:
+    """Create the marker with O_CREAT|O_EXCL, or stop if it already exists.
+
+    The file is created before scoring. It is not removed if scoring
+    raises, and it is not rewritten when the cache changes.
+    """
     import hashlib
     import json
+    import os
 
     payload = json.dumps(combo, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    body = json.dumps({"cuts_sha256": digest, "cuts": combo}, indent=2) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps({"cuts_sha256": digest, "cuts": combo}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        descriptor = os.open(path, flags, 0o644)
+    except FileExistsError:
+        _fail(
+            f"{path} already exists. The test set was scored once. "
+            "A different --output does not allow another score."
+        )
+    try:
+        os.write(descriptor, body.encode("utf-8"))
+    finally:
+        os.close(descriptor)
 
 
 def _run_grid(args) -> None:

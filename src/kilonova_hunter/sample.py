@@ -35,6 +35,10 @@ import numpy as np
 import pandas as pd
 
 from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
+from kilonova_hunter.model_grid import (
+    drop_after_two_component_cap,
+    uses_two_component_model,
+)
 from kilonova_hunter.recall import (
     MODEL_ERROR_ABORT_FRACTION,
     TUNING_SEED,
@@ -79,7 +83,8 @@ SPLITS = ("tuning", "test")
 
 # Bump this when a cached light curve would no longer match the code.
 # 2: the diffusion wrapper is on. A version-1 cache is pre-fix.
-CACHE_VERSION = 2
+# 3: two-component curves have no points after source-frame day 6.
+CACHE_VERSION = 3
 
 # Parent entropy shared by the tuning stream and the test stream.
 PARENT_SEED = TUNING_SEED
@@ -434,8 +439,21 @@ def _run_jobs(
         return list(pool.map(_simulate_one, jobs))
 
 
+def _curve_within_the_model(event, curve: pd.DataFrame) -> pd.DataFrame:
+    """Drop points the two-component model does not actually compute.
+
+    The three-component 2017-like and exact-copy curves are left as
+    they are. Their model grid goes past day 7.
+    """
+    kind = str(getattr(event, "kind", ""))
+    if not uses_two_component_model(kind):
+        return curve
+    return drop_after_two_component_cap(curve, float(event.redshift))
+
+
 def _event_record(event, *, error_reason: str | None, curve: pd.DataFrame) -> dict:
     """One fake as a flat row. Judgeable flags do not use the filter."""
+    curve = _curve_within_the_model(event, curve)
     failed = error_reason is not None
     if isinstance(event, VillarEvent):
         row: dict[str, object] = {
@@ -721,6 +739,7 @@ def simulate_population(
         by_id = {item[0]: item for item in simulated}
         for event in batch:
             object_id, curve, error_reason = by_id[event.object_id]
+            curve = _curve_within_the_model(event, curve)
             rows.append(_event_record(event, error_reason=error_reason, curve=curve))
             framed = _curve_frame(object_id, curve)
             if framed is not None:
@@ -780,6 +799,23 @@ def simulate_population(
     )
 
 
+def _judgeable_stop_column(definition: str) -> str:
+    """Which day-3 flag stops the exact-copy loop.
+
+    ``a`` is the official ``is_judgeable`` rule. ``b`` is the candidate
+    rule. The choice is part of the cache identity, so a cache built
+    for one definition is not reused for the other.
+    """
+    if definition == "a":
+        return "judgeable_day3"
+    if definition == "b":
+        return "judgeable_candidate_day3"
+    raise ValueError(
+        "judgeable_definition must be 'a' (official) or 'b' (candidate), "
+        f"got {definition!r}."
+    )
+
+
 def simulate_exact_copies(
     *,
     survey: SurveySettings | None = None,
@@ -790,17 +826,21 @@ def simulate_exact_copies(
     target_judgeable: int = EXACT_TARGET_JUDGEABLE,
     cap: int = EXACT_CAP,
     batch_size: int = EXACT_BATCH_SIZE,
+    judgeable_definition: str = "a",
 ) -> SampleResult:
     """Simulate exact AT2017gfo copies. They are not a recall set.
 
     The default follows Decision Log 12(16), which is proposed and
     not yet adopted. Batches are drawn at 40 Mpc, with random
     cadence dates and random positions, until at least
-    ``target_judgeable`` copies are judgeable at day 3 under the
-    official definition, or ``cap`` copies have been drawn. Pass
+    ``target_judgeable`` copies are judgeable at day 3, or ``cap``
+    copies have been drawn. ``judgeable_definition`` ``a`` uses the
+    official rule. ``b`` uses the candidate rule. Hitting the cap with
+    fewer than the target leaves the status ``untestable``. Pass
     ``count`` to draw a fixed number instead. That fixed draw is for
-    tests. The report uses the default.
+    tests. The report uses the default, definition (a), cap 4000.
     """
+    stop_column = _judgeable_stop_column(judgeable_definition)
     sky = survey if survey is not None else evaluation_survey()
     dust_source = dust if dust is not None else open_dust_source()
     folder = Path(cache_dir) / EXACT_KIND / "copies"
@@ -812,6 +852,7 @@ def simulate_exact_copies(
         count=count,
         target_judgeable=target_judgeable,
         cap=cap,
+        judgeable_definition=judgeable_definition,
     ):
         manifest, events, curves = loaded
         return _result_from_frames(
@@ -829,7 +870,7 @@ def simulate_exact_copies(
     batch_index = 0
     goal = count if count is not None else cap
     while drawn < goal:
-        if count is None and _flag_sum_rows(rows, "judgeable_day3") >= target_judgeable:
+        if count is None and _flag_sum_rows(rows, stop_column) >= target_judgeable:
             break
         this_batch = batch_size if count is None else count
         this_batch = min(this_batch, goal - drawn)
@@ -847,6 +888,7 @@ def simulate_exact_copies(
         by_id = {item[0]: item for item in simulated}
         for event in events_list:
             object_id, curve, error_reason = by_id[event.object_id]
+            curve = _curve_within_the_model(event, curve)
             rows.append(_event_record(event, error_reason=error_reason, curve=curve))
             framed = _curve_frame(object_id, curve)
             if framed is not None:
@@ -857,7 +899,7 @@ def simulate_exact_copies(
             break
     events = pd.DataFrame(rows)
     curves = pd.concat(frames, ignore_index=True) if frames else _empty_curves()
-    n_judge = _flag_sum(events, "judgeable_day3")
+    n_judge = _flag_sum(events, stop_column)
     if count is None and n_judge < target_judgeable:
         status = "untestable"
     else:
@@ -878,6 +920,7 @@ def simulate_exact_copies(
         "target_judgeable": None if count is not None else target_judgeable,
         "cap": None if count is not None else cap,
         "fixed_count": count,
+        "judgeable_definition": judgeable_definition,
         "status": status,
     }
     _write_cache(folder, manifest, events, curves)
@@ -904,6 +947,7 @@ def _exact_cache_matches(
     count: int | None,
     target_judgeable: int,
     cap: int,
+    judgeable_definition: str,
 ) -> bool:
     """True when a saved copy cache is the current code and the same draw."""
     if manifest.get("cache_version") != CACHE_VERSION:
@@ -917,6 +961,8 @@ def _exact_cache_matches(
     if manifest.get("redback_version") != _redback_version():
         return False
     if manifest.get("survey") != _survey_dict(survey):
+        return False
+    if manifest.get("judgeable_definition") != judgeable_definition:
         return False
     if count is not None:
         return int(manifest.get("n_simulated", 0)) == count
