@@ -1,0 +1,14 @@
+# SHA-256 of the upstream MOSFiT files at commit 6595248.
+# The copies in this folder must match these bytes. Do not reformat them.
+# name sha256 url
+blackbody.py aa7372f6340c8767ceaeb5611c112042255e876b6312eca43a1d7ea5baee3a56 https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/seds/blackbody.py
+constants.py 7d19c5309f13305588c8eddd680a6afb67e0206271f9a363157d1468e8a225ea https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/constants.py
+densetimes.py c1d81aeb303b307919d06fee8a57d559f9960cdeca2dee8b60df6220ca8a9e8c https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/arrays/densetimes.py
+diffusion.py a91bb9990fb66a550911c5bad6a722abdf769c88250d8cbe855477f99b1ca6e7 https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/transforms/diffusion.py
+engine.py 6cab7efbcf977b30503fe492e8df5bb2a7475bb32fdc52fc7c03e66ff472036a https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/engines/engine.py
+resttimes.py 891fa8983a7d47f16840b98cdd4caad38c648cbd19b468968bb0c86ab21d577f https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/arrays/resttimes.py
+rprocess.py dc6033f1e9367b1d894a8d386fa77be78a8203217f948298fa705ca4e5f1fa81 https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/engines/rprocess.py
+temperature_floor.py ac10aafd02004cde4fa335f3cd0130c06c8def2e275d7e6af2aa6bb10a69bf84 https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/photospheres/temperature_floor.py
+transform.py be5813c67fc5eee0305bf9b6ef571ef06ac59754442ecd220b56b2f9c2a9431a https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/modules/transforms/transform.py
+kilonova.json d4d8b405ac5532f780ab98e5226652c71539e4e7f6e3e810ea4d876fc77518b7 https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/models/kilonova/kilonova.json
+parameters.json eff57cf8f79237934aba4a1418717dc067f82a8a6e568fdb9e66edc1518ecc27 https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/mosfit/models/kilonova/parameters.json
