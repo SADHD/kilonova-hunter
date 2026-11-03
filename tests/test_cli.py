@@ -449,7 +449,7 @@ def test_score_test_requires_sfd_provenance_on_the_manifest(
                 {
                     "status": "ready",
                     "dust_mode": "sfd",
-                    "cache_version": 2,
+                    "cache_version": 3,
                     "diffusion_fix": "arnett-factor-2",
                     "n_simulated": 0,
                 }
@@ -559,3 +559,130 @@ def test_score_test_rejects_a_continue_cache_and_a_second_output(
     assert caught.value.code == 1
     assert "scored once" in capsys.readouterr().err
     assert not (other / "test_score.md").exists()
+
+
+def _ready_test_cache(cache: Path) -> None:
+    """Two empty finished test splits with the current cache identity."""
+    from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
+    from kilonova_hunter.sample import CACHE_VERSION
+    from kilonova_hunter.sky import dust_map_label
+
+    for population in ("2017-like", "realistic"):
+        folder = cache / population / "test"
+        folder.mkdir(parents=True)
+        (folder / "events.csv").write_text("object_id\n", encoding="utf-8")
+        (folder / "light_curves.csv").write_text(
+            "object_id,time_days,filter,magnitude,magnitude_error\n",
+            encoding="utf-8",
+        )
+        (folder / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "dust_mode": "sfd",
+                    "dust_map": dust_map_label(),
+                    "cache_version": CACHE_VERSION,
+                    "diffusion_fix": DIFFUSION_FIX_ID,
+                    "n_simulated": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
+def _score_argv(argv: list[str]) -> int:
+    """Run one score in a child process. Returns the exit code."""
+    from kilonova_hunter.cli import main
+
+    try:
+        main(argv)
+    except SystemExit as exc:
+        if exc.code in (None, 0):
+            return 0
+        return int(exc.code)
+    return 0
+
+
+def test_score_marker_is_exclusive_and_survives_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The marker is created before scoring. A crash still blocks a second run."""
+    output = tmp_path / "results"
+    output.mkdir()
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("scoring crashed")
+
+    monkeypatch.setattr("kilonova_hunter.grid.score_with_frozen_cuts", boom)
+    with pytest.raises(RuntimeError, match="scoring crashed"):
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    marker = cache / "test_scored_once.json"
+    assert marker.is_file()
+    assert not (output / "test_score.md").exists()
+    # A changed cache does not clear the marker.
+    manifest = cache / "2017-like" / "test" / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["note"] = "cache changed after the crash"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(other),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "scored once" in capsys.readouterr().err
+    assert marker.is_file()
+
+
+def test_two_concurrent_score_runs_let_one_through(tmp_path: Path) -> None:
+    """O_EXCL lets one of two simultaneous scores create the marker."""
+    import multiprocessing
+
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    shared = [
+        "recall",
+        "--score-test",
+        "--cuts",
+        str(cuts),
+        "--cache",
+        str(cache),
+    ]
+    argv_a = [*shared, "--output", str(first)]
+    argv_b = [*shared, "--output", str(second)]
+    context = multiprocessing.get_context("spawn")
+    with context.Pool(2) as pool:
+        codes = pool.map(_score_argv, [argv_a, argv_b])
+    assert sorted(codes) == [0, 1]
+    assert (cache / "test_scored_once.json").is_file()
+    reports = [first / "test_score.md", second / "test_score.md"]
+    assert sum(path.is_file() for path in reports) == 1

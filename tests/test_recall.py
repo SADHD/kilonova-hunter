@@ -293,6 +293,8 @@ def test_recall_writes_two_sets_from_different_seeds(tmp_path: Path) -> None:
     assert (tmp_path / "at2017gfo" / "events.csv").is_file()
     assert (tmp_path / "report.txt").is_file()
     assert "Test set (this is the recall number)" in text
+    assert "LEGACY" in text
+    assert "not the official" in text
     assert "not the official number" in text
     assert "Never detected at all" in text
     assert "have not been tuned" in text
@@ -312,6 +314,7 @@ def test_recall_help_lists_the_options(capsys: pytest.CaptureFixture[str]) -> No
     assert "--seed" in printed
     assert "--which" in printed
     assert "--cadence" in printed
+    assert "legacy" in printed.lower()
 
 
 def test_recall_without_redback_explains_the_extra(
@@ -675,8 +678,8 @@ def test_cache_key_includes_depths_redback_and_the_dust_map() -> None:
     assert loaded.n_model_failed == 0
 
 
-def test_realistic_temperature_floors_stay_at_the_redback_defaults() -> None:
-    """5000 K and 2500 K stay. The other pair is labeled NOT-COUNTED."""
+def test_realistic_temperature_floors_stay_at_the_project_assumptions() -> None:
+    """5000 K and 2500 K are this project's assumptions, not redback defaults."""
     from kilonova_hunter.villar import (
         NOT_COUNTED_TF_DYNAMICAL_K,
         NOT_COUNTED_TF_WIND_K,
@@ -694,6 +697,14 @@ def test_realistic_temperature_floors_stay_at_the_redback_defaults() -> None:
     assert event.tf_wind == 5000.0
     assert "NOT-COUNTED" in (not_counted_realistic_event.__doc__ or "")
     assert "this project's assumption" in (PopulationSettings.__doc__ or "")
+    from kilonova_hunter.villar import draw_opacity_prior
+
+    draws = np.array(
+        [draw_opacity_prior(np.random.default_rng(seed)) for seed in range(200)]
+    )
+    assert draws.min() >= 1.0
+    assert draws.max() <= 30.0
+    assert draws.std() > 1.0
 
 
 def test_mean_first_visit_wait_matches_the_length_weighted_gap() -> None:

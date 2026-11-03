@@ -369,6 +369,24 @@ def test_judgeable_copy_records_a_skipped_reddening_rule() -> None:
     assert "window 2 days" in text
 
 
+def test_sanity_copy_verdict_is_pass_fail_or_untestable() -> None:
+    """Untestable blocks sign-off. It is not a pass and not blocker False."""
+    from kilonova_hunter.grid import sanity_copy_verdict
+
+    untestable = sanity_copy_verdict(49, 49)
+    assert untestable["status"] == "untestable"
+    assert untestable["blocker"] is True
+    assert untestable["passed"] is False
+    failed = sanity_copy_verdict(50, 47)
+    assert failed["status"] == "fail"
+    assert failed["blocker"] is True
+    assert failed["fraction"] == pytest.approx(0.94)
+    passed = sanity_copy_verdict(50, 48)
+    assert passed["status"] == "pass"
+    assert passed["blocker"] is False
+    assert passed["fraction"] == pytest.approx(0.96)
+
+
 def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     """No judgeable copy is a blocker, not a blank that can be signed off."""
     from kilonova_hunter.grid import _copy_lines
@@ -400,12 +418,14 @@ def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     result = score_exact_copies(events, curves, combo)
     assert result["n_judgeable"] == 0
     assert result["official"]["status"] == "untestable"
-    assert result["blocker"] is False
+    assert result["blocker"] is True
+    assert result["candidate"]["status"] == "untestable"
+    assert result["blocker_candidate"] is True
     text = "\n".join(_copy_lines(result))
     assert "UNTESTABLE" in text
     assert "v1 not Done" in text
+    assert "blocks sign-off" in text
     assert "nan" not in text.lower()
-    assert "SIGN-OFF BLOCKER" not in text
 
 
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
@@ -513,6 +533,126 @@ def test_mass_is_clipped_and_speed_is_redrawn() -> None:
         np.isclose(speeds, 0.05, atol=1e-8) | np.isclose(speeds, 0.4, atol=1e-8)
     )
     assert on_a_limit < 0.05
+
+
+def test_bluer_color_hook_recomputes_recall_and_is_not_the_grid() -> None:
+    """A +0.4 mag bluer g-r can drop a fake that only just passed the color cut."""
+    from kilonova_hunter.grid import (
+        MEASURED_G_MINUS_R_GAP_MAG,
+        recall_with_bluer_color,
+    )
+
+    assert MEASURED_G_MINUS_R_GAP_MAG == pytest.approx(0.4)
+    prepared = [
+        PreparedFake(
+            object_id="like-000",
+            distance_mpc=40.0,
+            judgeable=True,
+            judgeable_candidate=True,
+            model_failed=False,
+            fade_passed=True,
+            color_value=0.45,
+            rises={(2.0, 0.5): 0.4},
+        )
+    ]
+    combo = {
+        "redder_than_g_minus_r": 0.2,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    plain = score_prepared(
+        prepared, combo, population="2017-like", day=3.0, status="ready"
+    )
+    shifted = recall_with_bluer_color(prepared, combo)
+    assert plain["n_caught_and_judgeable"] == 1
+    assert shifted["recall_judgeable"] == pytest.approx(0.0)
+    assert shifted["n_caught_and_judgeable"] == 0
+    assert prepared[0].color_value == pytest.approx(0.45)
+
+
+def test_exact_copy_loop_stops_at_the_4000_cap_untestable(
+    tmp_path, monkeypatch
+) -> None:
+    """Hitting 4000 copies below 50 judgeable is untestable, not a short sample."""
+    import json
+
+    from kilonova_hunter import sample as sample_mod
+    from kilonova_hunter.sample import simulate_exact_copies
+    from kilonova_hunter.sky import DustSource
+    from kilonova_hunter.villar import EXACT_KIND
+
+    def fake_jobs(jobs, workers):
+        return [(job["event"].object_id, pd.DataFrame(), None) for job in jobs]
+
+    monkeypatch.setattr(sample_mod, "_run_jobs", fake_jobs)
+    result = simulate_exact_copies(
+        dust=DustSource(mode="dry-run", reason="test"),
+        cache_dir=tmp_path,
+        cap=4000,
+        batch_size=1000,
+        target_judgeable=50,
+    )
+    assert result.n_simulated == 4000
+    assert result.status == "untestable"
+    manifest = json.loads(
+        (tmp_path / EXACT_KIND / "copies" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["cap"] == 4000
+    assert manifest["status"] == "untestable"
+    assert manifest["judgeable_definition"] == "a"
+    assert manifest["n_judgeable_day3"] == 0
+
+
+def test_copy_loop_switch_covers_both_judgeable_definitions(
+    tmp_path, monkeypatch
+) -> None:
+    """(a) can stop while (b) is still untestable, and the cache keeps them apart."""
+    from kilonova_hunter import sample as sample_mod
+    from kilonova_hunter.sample import simulate_exact_copies
+    from kilonova_hunter.sky import DustSource
+
+    real_record = sample_mod._event_record
+
+    def official_only(event, *, error_reason, curve):
+        row = real_record(event, error_reason=error_reason, curve=curve)
+        row["judgeable_day3"] = 1
+        row["judgeable_candidate_day3"] = 0
+        return row
+
+    def fake_jobs(jobs, workers):
+        return [(job["event"].object_id, pd.DataFrame(), None) for job in jobs]
+
+    monkeypatch.setattr(sample_mod, "_event_record", official_only)
+    monkeypatch.setattr(sample_mod, "_run_jobs", fake_jobs)
+    dust = DustSource(mode="dry-run", reason="test")
+    official = simulate_exact_copies(
+        dust=dust,
+        cache_dir=tmp_path / "a",
+        cap=30,
+        batch_size=5,
+        target_judgeable=5,
+        judgeable_definition="a",
+    )
+    assert official.n_simulated == 5
+    assert official.status == "ready"
+    candidate = simulate_exact_copies(
+        dust=dust,
+        cache_dir=tmp_path / "a",
+        cap=30,
+        batch_size=5,
+        target_judgeable=5,
+        judgeable_definition="b",
+    )
+    assert candidate.n_simulated == 30
+    assert candidate.status == "untestable"
+    with pytest.raises(ValueError, match="judgeable_definition"):
+        simulate_exact_copies(
+            dust=dust,
+            cache_dir=tmp_path / "c",
+            judgeable_definition="c",
+            count=1,
+        )
 
 
 def _row(recall: float, color: float, rise: float, gap: float, window: float) -> dict:

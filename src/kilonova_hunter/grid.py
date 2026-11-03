@@ -46,6 +46,11 @@ from kilonova_hunter.config import THRESHOLDS, Thresholds
 from kilonova_hunter.features import g_minus_r_at_time, g_minus_r_rise, peak_time_days
 from kilonova_hunter.filter import evaluate_fade_rule, is_kilonova_candidate
 from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
+from kilonova_hunter.model_grid import (
+    REALISTIC_DAY7_LABEL,
+    drop_after_two_component_cap,
+    uses_two_component_model,
+)
 from kilonova_hunter.recall import (
     EARLY_GAP_MODEL_LIMIT,
     light_curve_for_the_filter,
@@ -351,6 +356,12 @@ def prepare_fakes(
     )
     for row in usable.itertuples(index=False):
         curve = by_id.get(str(row.object_id), empty)
+        kind = str(getattr(row, "kind", ""))
+        redshift = float(getattr(row, "redshift", 0.0))
+        if uses_two_component_model(kind):
+            # Day 7 for the realistic set is this same cut: nothing after
+            # source-frame day 6 is a detection.
+            curve = drop_after_two_component_cap(curve, redshift)
         # 0/1 after a CSV round trip, or a real bool from a fresh frame.
         failed = bool(
             int(pd.to_numeric(pd.Series([row.model_failed])).fillna(0).iloc[0])
@@ -465,6 +476,51 @@ def _rates(caught: int, judge_caught: int, judgeable: int, total: int) -> dict:
         "catch_low": catch_low,
         "catch_high": catch_high,
     }
+
+
+# Measured model g-r minus AT2017gfo in the 1.5-3 day window.
+# +0.37 at 1.5 d, +0.47 at 2 d, +0.41 at 3 d. The default offset is
+# the middle of that range. The hook is not called by the tuning grid.
+MEASURED_G_MINUS_R_GAP_MAG = 0.4
+G_MINUS_R_GAP_BY_DAY = ((1.5, 0.37), (2.0, 0.47), (3.0, 0.41))
+
+
+def recall_with_bluer_color(
+    prepared: list[PreparedFake],
+    combo: dict[str, float],
+    offset: float = MEASURED_G_MINUS_R_GAP_MAG,
+    *,
+    population: str = "2017-like",
+    day: float = 3.0,
+    status: str = "ready",
+) -> dict:
+    """Recompute recall after shifting 2017-like g-r bluer by ``offset``.
+
+    Subtracting ``offset`` magnitudes from g-r is the sensitivity for
+    the measured model-minus-AT2017gfo color gap. The default is +0.4
+    mag. The epoch values are +0.37 at 1.5 d, +0.47 at 2 d, and +0.41
+    at 3 d, so the offset sits in 0.3 to 0.47. A constant shift does
+    not change the reddening rise. This is a reporting hook. The tuning
+    grid does not call it.
+    """
+    from dataclasses import replace
+
+    shifted = [
+        replace(
+            fake,
+            color_value=(
+                None if fake.color_value is None else fake.color_value - float(offset)
+            ),
+        )
+        for fake in prepared
+    ]
+    return score_prepared(
+        shifted,
+        combo,
+        population=population,
+        day=day,
+        status=status,
+    )
 
 
 def score_prepared(
@@ -614,10 +670,18 @@ def score_exact_copies(
 ) -> dict:
     """How many exact copies are judgeable, and how many of those are caught.
 
-    Copies are not in the recall. Zero judgeable copies is a sign-off
-    blocker, and so is catching fewer than 95 percent of the judgeable
-    copies. Misses are listed with the start time, the sky position,
-    E(B-V), and the rule that failed.
+    The sanity result is tri-state, from ``sanity_copy_verdict``.
+
+    - ``pass``: at least 50 copies are judgeable and at least 95 percent
+      of those were caught.
+    - ``fail``: at least 50 are judgeable and fewer than 95 percent were
+      caught. That blocks sign-off.
+    - ``untestable``: fewer than 50 are judgeable, including zero.
+      Untestable is its own state. It blocks sign-off and is reported
+      as UNTESTABLE. It is not a pass, and it is not printed as NaN.
+
+    Copies are not in the recall. Misses are listed with the start
+    time, the sky position, E(B-V), and the rule that failed.
     """
     if events.empty:
         empty_official = sanity_copy_verdict(0, 0)
@@ -630,8 +694,8 @@ def score_exact_copies(
             "n_caught_candidate": 0,
             "fraction_judgeable_caught": empty_official["fraction"],
             "fraction_candidate_caught": empty_candidate["fraction"],
-            "blocker": False,
-            "blocker_candidate": False,
+            "blocker": empty_official["blocker"],
+            "blocker_candidate": empty_candidate["blocker"],
             "official": empty_official,
             "candidate": empty_candidate,
             "misses": [],
@@ -696,34 +760,40 @@ def score_exact_copies(
 
 
 def sanity_copy_verdict(n_judge: int, n_caught: int, *, target: int = 50) -> dict:
-    """Observed catch rate for one judgeable definition.
+    """Tri-state sanity result for one judgeable definition.
 
-    Fewer than ``target`` judgeable copies, including zero, is
-    ``sanity block UNTESTABLE, v1 not Done``. That is not a pass and it
-    is not printed as NaN. At or above the target, the fraction is an
-    observed catch rate. It is a blocker below 95 percent, which is
-    more than 2 misses in 50, or when a miss is later traced to a bug.
-    It is not a 95-percent-confidence claim.
+    ``untestable`` means fewer than ``target`` judgeable copies,
+    including zero. That blocks sign-off. The report says UNTESTABLE.
+    It does not say the copies passed, and it does not print a bare NaN.
+
+    ``fail`` means there are enough judgeable copies and fewer than
+    95 percent were caught. That is more than 2 misses in 50. It
+    blocks sign-off.
+
+    ``pass`` means there are enough judgeable copies and at least
+    95 percent were caught. The fraction is an observed catch rate,
+    not a 95-percent-confidence claim.
     """
     if n_judge < target:
         return {
             "status": "untestable",
             "phrase": "sanity block UNTESTABLE, v1 not Done",
             "fraction": float("nan"),
-            "blocker": False,
+            "blocker": True,
             "passed": False,
             "n_judge": n_judge,
             "n_caught": n_caught,
         }
     fraction = float(n_caught / n_judge)
     blocker = fraction < 0.95
+    status = "fail" if blocker else "pass"
     return {
-        "status": "observed",
+        "status": status,
         "phrase": (
             f"observed catch rate {n_caught} of {n_judge} "
             f"({100.0 * fraction:.1f}%). "
             "This is not a 95%-confidence claim. "
-            "A blocker is fewer than 95% caught, more than 2 misses in 50, "
+            "A fail is fewer than 95% caught, more than 2 misses in 50, "
             "or any miss traced to a bug."
         ),
         "fraction": fraction,
@@ -991,6 +1061,8 @@ def format_test_score(
                 f"Reddening skipped: {row['n_reddening_skipped']}. "
                 f"Caught but not judgeable: {row['n_caught_not_judgeable']}."
             )
+            if row["population"] == "realistic" and day == 7:
+                lines.append(REALISTIC_DAY7_LABEL)
             lines.append("")
     return "\n".join(lines)
 
@@ -1106,7 +1178,7 @@ def summarize_grid(
     lines.append("")
     lines.append(
         "Bins are luminosity distance: 10-100, 100-200, and 200-300 Mpc. "
-        "The last bin ends at 300."
+        "The last bin ends at 300. " + REALISTIC_DAY7_LABEL
     )
     return "\n".join(lines) + "\n"
 
@@ -1194,8 +1266,9 @@ def run_tuning_grid(
 def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
     """List every caught-but-not-judgeable case at days 3, 5, and 7.
 
-    The list does not invalidate the run. The team decides what a
-    nonzero count means. The official judgeable rule is not changed.
+    These fakes are in the catch rate and not in the judgeable
+    denominator, so that day's recall does not include them. The
+    official judgeable rule is not changed.
     """
     headline = [
         row
@@ -1211,7 +1284,8 @@ def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
         "",
         "Every cell below is a day-3, day-5, or day-7 case where the filter "
         "flagged a fake the official judgeable rule did not accept. "
-        "This list does not invalidate the run. The team decides that.",
+        "Those fakes stay in the catch rate and stay out of the judgeable "
+        "denominator, so the recall for that day does not include them.",
         "",
     ]
     for row in sorted(
@@ -1237,6 +1311,8 @@ def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
             f"gap {combo['min_color_separation_days']} days: "
             f"{row['n_caught_not_judgeable']} caught and not judgeable."
         )
+        if population == "realistic" and day == 7.0:
+            lines.append(REALISTIC_DAY7_LABEL)
         for example in examples:
             lines.append(
                 f"- {example['object_id']} at {example['distance_mpc']:.1f} Mpc, "
@@ -1313,7 +1389,8 @@ def _sanity_line(label: str, verdict: dict, n_copies: int) -> str:
     """One sentence for definition (a) or (b). Never prints a bare NaN."""
     if verdict["status"] == "untestable":
         return (
-            f"Judgeable ({label}): {verdict['phrase']}. "
+            f"Judgeable ({label}): UNTESTABLE. {verdict['phrase']}. "
+            "This blocks sign-off. "
             f"{verdict['n_judge']} judgeable, {verdict['n_caught']} caught, "
             f"out of {n_copies} copies."
         )
