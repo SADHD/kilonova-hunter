@@ -1,8 +1,8 @@
-"""Rerun every checks/mosfit script and compare it with the committed .out.
+"""Rerun every checks/mosfit script and compare its stdout with the committed .out.
 
-Log lines from redback and bilby carry a timestamp, so those lines are
-dropped. A fresh machine also prints one line per sncosmo bandpass it
-downloads. Numbers may differ by float noise. Anything else has to match.
+Library logs and warnings go to stderr and are not part of the comparison.
+The bandpasses are in the repository, so sncosmo does not download them.
+Numbers may differ by float noise. Any other stdout difference fails.
 """
 
 from __future__ import annotations
@@ -19,19 +19,6 @@ CHECKS = ROOT / "checks" / "mosfit"
 RELATIVE_TOLERANCE = 1e-3
 ABSOLUTE_TOLERANCE = 1e-4
 _NUMBER = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
-_LOG_MARKERS = ("redback WARNING", "redback INFO", "bilby INFO")
-
-
-def _scientific_lines(text: str) -> list[str]:
-    kept = []
-    for line in text.splitlines():
-        if any(marker in line for marker in _LOG_MARKERS):
-            continue
-        # sncosmo prints this only when the bandpass is not cached yet.
-        if line.strip().startswith("Downloading http"):
-            continue
-        kept.append(line)
-    return kept
 
 
 def _same_number(found: str, expected: str) -> bool:
@@ -66,8 +53,8 @@ def _line_differs(found: str, expected: str) -> str | None:
 
 def compare(found: str, expected: str) -> list[str]:
     """Human-readable mismatches. Empty when the texts agree."""
-    got = _scientific_lines(found)
-    want = _scientific_lines(expected)
+    got = found.splitlines()
+    want = expected.splitlines()
     problems = []
     if len(got) != len(want):
         problems.append(f"line count {len(got)} vs {len(want)}")
@@ -99,14 +86,14 @@ def main() -> int:
         completed = subprocess.run(
             [sys.executable, str(script)],
             cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            capture_output=True,
             text=True,
             check=False,
         )
         if completed.returncode != 0:
             print(f"{script.name} exited {completed.returncode}", file=sys.stderr)
             print(completed.stdout[-2000:], file=sys.stderr)
+            print(completed.stderr[-2000:], file=sys.stderr)
             failed = True
             continue
         problems = compare(completed.stdout, expected_path.read_text(encoding="utf-8"))

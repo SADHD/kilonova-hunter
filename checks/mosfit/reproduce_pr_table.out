@@ -1,7 +1,3 @@
-17:16 redback WARNING : No module named 'lalsimulation'
-17:16 redback WARNING : lalsimulation is not installed. Some EOS based models will not work. Please use bilby eos or pass your own EOS generation class to the model
-17:16 bilby INFO    : Running bilby version: 2.8.2
-17:16 redback INFO    : Running redback version: 1.20.0
 PR column          0.082  0.072  0.207  0.337  0.474  0.657  0.839  0.948  1.116  1.269  1.461  1.693
 A redback grid (as three_component), x2   0.695  0.678  0.810  0.932  1.064  1.202  1.001  1.040  1.177  1.284  1.412  1.555   max|dmag vs PR| = 2.43
 B redback grid, raw (no wrapper)          0.347  0.339  0.405  0.466  0.532  0.601  0.500  0.520  0.589  0.642  0.706  0.777   max|dmag vs PR| = 1.68

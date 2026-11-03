@@ -1,7 +1,3 @@
-17:16 redback WARNING : No module named 'lalsimulation'
-17:16 redback WARNING : lalsimulation is not installed. Some EOS based models will not work. Please use bilby eos or pass your own EOS generation class to the model
-17:16 bilby INFO    : Running bilby version: 2.8.2
-17:16 redback INFO    : Running redback version: 1.20.0
 blue exact quad: 3.825e+41 4.722e+41 4.991e+41 4.677e+41 3.151e+41 5.215e+40
   first dense=0.1 d, t=0 point=True:  ratio to exact 561435.336 412258.337 306827.895 262411.373 180588.525 17211.296
   first dense=0.1 d, t=0 point=False:  ratio to exact 0.647 0.741 0.807 0.835 0.887 0.989

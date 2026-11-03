@@ -1,0 +1,18 @@
+Bandpasses used by the MOSFiT checks, copied from the sncosmo data mirror
+so a fresh runner does not download them. sncosmo looks these up under
+SNCOSMO_DATA_DIR, which bootstrap.install sets to this directory.
+
+https://sncosmo.github.io/data/bandpasses/csp/g_tel_ccd_atm_ext_1.2.dat
+https://sncosmo.github.io/data/bandpasses/csp/r_tel_ccd_atm_ext_1.2.dat
+https://sncosmo.github.io/data/bandpasses/csp/i_tel_ccd_atm_ext_1.2.dat
+https://sncosmo.github.io/data/bandpasses/sdss/sdss_g.dat
+https://sncosmo.github.io/data/bandpasses/sdss/sdss_r.dat
+https://sncosmo.github.io/data/bandpasses/sdss/sdss_i.dat
+https://sncosmo.github.io/data/bandpasses/des/des_g.dat
+https://sncosmo.github.io/data/bandpasses/des/des_r.dat
+https://sncosmo.github.io/data/bandpasses/des/des_i.dat
+https://sncosmo.github.io/data/bandpasses/ps1/ps1_r.dat
+https://sncosmo.github.io/data/bandpasses/ps1/ps1_i.dat
+https://sncosmo.github.io/data/bandpasses/lsst/total_g.dat
+https://sncosmo.github.io/data/bandpasses/lsst/total_r.dat
+https://sncosmo.github.io/data/bandpasses/lsst/total_i.dat
