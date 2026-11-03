@@ -41,4 +41,4 @@ max |rb - MOSFiT| over all dense t >= 0.5 d, g: no-gamma 0.028  kg=100 0.028  rb
 max |rb - MOSFiT| over all dense t >= 0.5 d, r: no-gamma 0.023  kg=100 0.023  rb vs own SED 0.000
 max |rb - MOSFiT| over all dense t >= 0.5 d, i: no-gamma 0.020  kg=100 0.020  rb vs own SED 0.000
 docs/mosfit_external_check.csv
-{'g': 0.02795799087710904, 'r': 0.023064827172788682, 'i': 0.020295528716914646, 'bolometric': 0.029631737631329813}
+g 0.027958 r 0.023065 i 0.020296 bolometric 0.029632
