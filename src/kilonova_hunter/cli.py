@@ -168,6 +168,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     recall.add_argument(
+        "--tuning-only",
+        action="store_true",
+        help=(
+            "With --grid, simulate and score only the tuning split of "
+            "both sets. Does not simulate, read, or write the test "
+            "split, and does not touch the test-set ledger."
+        ),
+    )
+    recall.add_argument(
         "--fetch-alerts",
         action="store_true",
         help=(
@@ -899,7 +908,7 @@ def _run_grid(args) -> None:
     import logging
 
     from kilonova_hunter.grid import run_tuning_grid
-    from kilonova_hunter.sample import SampleSizeSettings
+    from kilonova_hunter.sample import SPLITS, SampleSizeSettings
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
@@ -916,11 +925,15 @@ def _run_grid(args) -> None:
             "kilohunt recall --grid needs the redback library. Install it with:\n"
             "    uv sync --extra sim"
         )
+    # Missing on a hand-built args object means the historical default:
+    # both splits. --tuning-only never asks for the test split.
+    splits = ("tuning",) if getattr(args, "tuning_only", False) else SPLITS
     result = run_tuning_grid(
         output_dir=args.output,
         cache_dir=args.cache,
         sample_size=size,
         workers=max(1, args.workers),
+        splits=splits,
     )
     print(result.text)
     if result.sign_off_blocker:

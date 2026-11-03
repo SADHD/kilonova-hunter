@@ -789,6 +789,80 @@ def test_copy_loop_switch_covers_both_judgeable_definitions(
         )
 
 
+def test_split_rng_seeds_are_derived_independently() -> None:
+    """Each split's stream is keyed by its name, not by draw order.
+
+    Drawing the test split does not move the next tuning draw. The
+    entropy tuple itself is unchanged, so existing test-set ids stay
+    the ids of the current parent seed.
+    """
+    import numpy as np
+
+    from kilonova_hunter.sample import parameter_rng, survey_seed
+
+    tuning = parameter_rng("tuning", "realistic", 0)
+    before = tuning.random(4)
+    parameter_rng("test", "realistic", 0).random(8)
+    parameter_rng("test", "2017-like", 1).random(3)
+    again = parameter_rng("tuning", "realistic", 0).random(4)
+    assert np.array_equal(again, before)
+    other = parameter_rng("test", "realistic", 0).random(4)
+    assert not np.array_equal(other, before)
+    assert survey_seed("tuning", "realistic", 0, 0) == survey_seed(
+        "tuning", "realistic", 0, 0
+    )
+    assert survey_seed("tuning", "realistic", 0, 0) != survey_seed(
+        "test", "realistic", 0, 0
+    )
+
+
+def test_color_sensitivity_scope_covers_both_definitions() -> None:
+    """Both sets, days 3/5/7, both shifts, and recall (a) and (b)."""
+    from kilonova_hunter.grid import (
+        COLOR_SENSITIVITY_DAYS,
+        COLOR_SENSITIVITY_POPULATIONS,
+        COLOR_SENSITIVITY_SHIFTS_MAG,
+        PreparedFake,
+        format_color_sensitivity_scope,
+    )
+    from kilonova_hunter.model_grid import REALISTIC_DAY7_LABEL
+
+    fake = PreparedFake(
+        object_id="shift",
+        distance_mpc=40.0,
+        judgeable=True,
+        judgeable_candidate=False,
+        model_failed=False,
+        fade_passed=True,
+        color_value=0.35,
+        rises={(2.0, 0.5): 0.2},
+    )
+    prepared = {day: [fake] for day in COLOR_SENSITIVITY_DAYS}
+    examples = {
+        population: (prepared, None) for population in COLOR_SENSITIVITY_POPULATIONS
+    }
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    report = format_color_sensitivity_scope(examples, combo)
+    assert COLOR_SENSITIVITY_SHIFTS_MAG == (0.4, 0.3)
+    for population in COLOR_SENSITIVITY_POPULATIONS:
+        for day in COLOR_SENSITIVITY_DAYS:
+            for shift in COLOR_SENSITIVITY_SHIFTS_MAG:
+                needle = f"{population} day {day:g}, g-r bluer by +{shift:.1f} mag:"
+                assert needle in report
+    bluer = "2017-like day 3, g-r bluer by +"
+    assert f"{bluer}0.4 mag: recall (a) 0.0%, recall (b) no recall." in report
+    assert f"{bluer}0.3 mag: recall (a) 100.0%, recall (b) no recall." in report
+    assert "recall (a)" in report
+    assert "recall (b)" in report
+    assert REALISTIC_DAY7_LABEL in report
+    assert report.count(REALISTIC_DAY7_LABEL) == 1
+
+
 def _row(recall: float, color: float, rise: float, gap: float, window: float) -> dict:
     return {
         "recall_judgeable": recall,
