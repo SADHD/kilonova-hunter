@@ -1191,16 +1191,18 @@ def summarize_grid(
         offenders = int(best["n_caught_not_judgeable"])
         lines.append("")
         lines.append(
-            f"Caught but not judgeable, at that combination and day 3: {offenders}."
+            f"Caught but not judgeable, at that combination and day 3: {offenders}. "
+            "Rule 5 requires this count to be 0."
         )
         if offenders:
             lines.append(
-                "That count is not zero. The filter can flag a fake the frozen "
-                "judgeable rule rejects, because the color rule may interpolate "
-                "g and r from different nights and the fade rule may use two "
-                "points closer together than 0.5 days. Those fakes are listed "
-                "in the run log. They stay in the catch rate, because the catch "
-                "rate is every fake the filter flagged."
+                "That count is not zero, so it breaks rule 5 and must be "
+                "investigated before the run counts. The filter can flag a "
+                "fake the frozen judgeable rule rejects, because the color "
+                "rule may interpolate g and r from different nights and the "
+                "fade rule may use two points closer together than 0.5 days. "
+                "Those fakes are listed in the run log. They stay in the catch "
+                "rate, because the catch rate is every fake the filter flagged."
             )
     if copies is not None:
         lines.extend(_copy_lines(copies))
@@ -1304,9 +1306,11 @@ def run_tuning_grid(
 def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
     """List every caught-but-not-judgeable case at days 3, 5, and 7.
 
-    These fakes are in the catch rate and not in the judgeable
-    denominator, so that day's recall does not include them. The
-    official judgeable rule is not changed.
+    Rule 5 requires the count to be 0. A nonzero count breaks rule 5
+    and must be investigated before the run counts. This text does not
+    itself block the run. These fakes are in the catch rate and not in
+    the judgeable denominator, so that day's recall does not include
+    them. The official judgeable rule is not changed.
     """
     headline = [
         row
@@ -1323,7 +1327,9 @@ def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
         "Every cell below is a day-3, day-5, or day-7 case where the filter "
         "flagged a fake the official judgeable rule did not accept. "
         "Those fakes stay in the catch rate and stay out of the judgeable "
-        "denominator, so the recall for that day does not include them.",
+        "denominator, so the recall for that day does not include them. "
+        "Rule 5 requires this count to be 0. A nonzero count breaks rule 5 "
+        "and must be investigated before the run counts.",
         "",
     ]
     for row in sorted(
@@ -1423,17 +1429,33 @@ def _power_clause(value: float) -> str:
     return f" Chance the Wilson lower bound clears 70% recall: {shown}."
 
 
-def _sanity_line(label: str, verdict: dict, n_copies: int) -> str:
+def _sanity_line(
+    label: str, verdict: dict, n_copies: int, *, blocks_sign_off: bool = True
+) -> str:
     """One sentence for definition (a) or (b). Never prints a bare NaN."""
     if verdict["status"] == "untestable":
+        block = "This blocks sign-off. " if blocks_sign_off else ""
         return (
             f"Judgeable ({label}): UNTESTABLE. {verdict['phrase']}. "
-            "This blocks sign-off. "
+            f"{block}"
             f"{verdict['n_judge']} judgeable, {verdict['n_caught']} caught, "
             f"out of {n_copies} copies."
         )
-    prefix = "SIGN-OFF BLOCKER. " if verdict["blocker"] else ""
+    prefix = "SIGN-OFF BLOCKER. " if verdict["blocker"] and blocks_sign_off else ""
     return f"{prefix}Judgeable ({label}): {verdict['phrase']} Out of {n_copies} copies."
+
+
+def _candidate_line(verdict: dict, n_copies: int, stopping: str) -> str:
+    """Definition (b). Indicative unless the draw stopped on (b)."""
+    line = _sanity_line(
+        "b, candidate, not adopted",
+        verdict,
+        n_copies,
+        blocks_sign_off=stopping == "b",
+    )
+    if stopping != "b":
+        line += " Indicative, not a 12(16) result."
+    return line
 
 
 def _copy_lines(copies: dict) -> list[str]:
@@ -1444,6 +1466,7 @@ def _copy_lines(copies: dict) -> list[str]:
         int(copies.get("n_judgeable_candidate", 0)),
         int(copies.get("n_caught_candidate", 0)),
     )
+    stopping = str(copies.get("stopping_definition", "a"))
     lines = [
         "",
         "## Exact AT2017gfo copies",
@@ -1455,9 +1478,7 @@ def _copy_lines(copies: dict) -> list[str]:
         "12(16) is proposed: keep drawing until 50 are judgeable, cap 4,000.",
         "",
         _sanity_line("a, official", official, int(copies["n_copies"])),
-        _sanity_line(
-            "b, candidate, not adopted", candidate, int(copies["n_copies"])
-        ),
+        _candidate_line(candidate, int(copies["n_copies"]), stopping),
     ]
     if copies["misses"]:
         lines.append("")
