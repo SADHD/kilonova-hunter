@@ -50,9 +50,19 @@ def test_constant_heating_reaches_the_arnett_curve() -> None:
         5.0: 1.0,
         10.0: 1.0,
     }
+    # The integral grid is the array we pass. It starts at 0, and 1000
+    # of the 12001 samples sit before t/t_d = 1.
+    assert float(times[0]) == pytest.approx(0.0)
+    assert int(np.sum(times < 1.0)) == 1000
+    early = {
+        0.1: 1.0 - np.exp(-(0.1**2)),
+        0.25: 1.0 - np.exp(-(0.25**2)),
+        0.5: 1.0 - np.exp(-(0.5**2)),
+    }
+    expected.update(early)
     for time_over_td, target in expected.items():
         found = _ratio_at(times, ratio, time_over_td)
-        assert found == pytest.approx(target, abs=0.02)
+        assert found == pytest.approx(target, abs=0.005)
 
 
 def test_diffusion_time_is_not_doubled() -> None:
@@ -73,7 +83,7 @@ def test_diffusion_time_is_not_doubled() -> None:
         doubled_time = diffuse(times, heating, 2.0 * diffusion_time)
     at_td = _ratio_at(times, correct, diffusion_time)
     at_td_if_time_were_doubled = _ratio_at(times, doubled_time, diffusion_time)
-    assert at_td == pytest.approx(target, abs=0.02)
+    assert at_td == pytest.approx(target, abs=0.005)
     assert at_td_if_time_were_doubled < 0.40
 
 
@@ -108,7 +118,9 @@ def test_wrapper_doubles_bolometric_luminosity_and_restores_usetex() -> None:
 
     from kilonova_hunter.redback_fix import corrected_diffusion
 
-    time = np.linspace(0.2, 3.0, 40) * 86400.0
+    # Start at 0.01 day. A grid that starts at 0.2 day drops the early
+    # part of the diffusion integral and moves the ratio off 2.
+    time = np.geomspace(1e-2, 3.0, 80) * 86400.0
     plain, _temperature, _radius = _one_component_kilonova_model(
         time, 0.02, 0.266, 0.5, temperature_floor=674.0
     )
@@ -179,3 +191,74 @@ def test_villar_call_passes_the_table_temperature_floors(monkeypatch) -> None:
     assert captured["args"][8] == 1308.0
     assert captured["args"][12] == 3745.0
     assert captured["fixed"] is True
+
+
+def test_nested_patch_stays_at_factor_two() -> None:
+    """A second entry does not wrap the wrapper. The factor stays 2, not 4."""
+    diffusion_time = 1.0
+    times = np.linspace(0.0, 4.0, 4001)
+    heating = np.ones_like(times)
+    target = 1.0 - np.exp(-1.0)
+    with corrected_diffusion():
+        with corrected_diffusion():
+            from redback.transient_models import kilonova_models
+
+            luminosity = kilonova_models._kilonova_diffusion_luminosity(
+                times, heating, diffusion_time
+            )
+    found = _ratio_at(times, luminosity, diffusion_time)
+    assert found == pytest.approx(target, abs=0.005)
+
+
+def test_an_already_patched_function_is_refused() -> None:
+    """A leaked patch is not wrapped again."""
+    from redback.transient_models import kilonova_models
+
+    original = kilonova_models._kilonova_diffusion_luminosity
+
+    def already(time, thermalised_luminosity, diffusion_timescale):
+        return original(time, thermalised_luminosity, diffusion_timescale)
+
+    already._hunter_diffusion_fix = True  # type: ignore[attr-defined]
+    kilonova_models._kilonova_diffusion_luminosity = already
+    try:
+        with pytest.raises(RuntimeError, match="already applied"):
+            with corrected_diffusion():
+                pass
+    finally:
+        kilonova_models._kilonova_diffusion_luminosity = original
+
+
+def test_realistic_and_legacy_paths_run_with_the_diffusion_fix(monkeypatch) -> None:
+    """Both public two-component callers are inside the wrapper."""
+    from kilonova_hunter.recall import at2017gfo_like_event, redback_magnitudes
+    from kilonova_hunter.villar import realistic_magnitudes
+
+    seen: list[bool] = []
+
+    def fake(*args, **kwargs):
+        from redback.transient_models import kilonova_models
+
+        seen.append(
+            bool(
+                getattr(
+                    kilonova_models._kilonova_diffusion_luminosity,
+                    "_hunter_diffusion_fix",
+                    False,
+                )
+            )
+        )
+        return np.zeros(len(args[0]))
+
+    monkeypatch.setattr(
+        "redback.transient_models.kilonova_models.two_component_bns_ejecta_relation",
+        fake,
+    )
+    monkeypatch.setattr(
+        "redback.transient_models.kilonova_models.two_component_kilonova_model",
+        fake,
+    )
+    event = at2017gfo_like_event()
+    realistic_magnitudes(np.array([1.0]), np.array(["g"]), event)
+    redback_magnitudes(np.array([1.0]), np.array(["g"]), event)
+    assert seen == [True, True]
