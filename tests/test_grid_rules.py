@@ -456,7 +456,12 @@ def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     assert "UNTESTABLE" in text
     assert "v1 not Done" in text
     assert "blocks sign-off" in text
+    assert "Indicative, not a 12(16) result." in text
     assert "nan" not in text.lower()
+    stopped_on_b = dict(result)
+    stopped_on_b["stopping_definition"] = "b"
+    b_text = "\n".join(_copy_lines(stopped_on_b))
+    assert "Indicative, not a 12(16) result." not in b_text
 
 
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
