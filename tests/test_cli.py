@@ -658,13 +658,19 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
                 str(cache),
             ]
         )
-    # The exclusive claim is written before scoring. The ledger entry is
-    # written only after the score file exists, so a crash leaves no ledger.
+    # A pending entry counts as scored. The crash consumes the set.
     marker = tmp_path / "test_set_scored.json"
-    assert not marker.is_file()
-    assert any((tmp_path / "test_set_claims").iterdir())
+    pending = json.loads(marker.read_text(encoding="utf-8"))
+    entry = next(iter(pending["sets"].values()))[0]
+    assert entry["status"] == "pending"
+    assert entry["object_ids"]["2017-like"] == ["2017-like-1"]
+    assert "score_sha256" not in entry
+    claim = next((tmp_path / "test_set_claims").iterdir())
+    claim_body = json.loads(claim.read_text(encoding="utf-8"))
+    assert claim_body["object_ids"]["2017-like"] == ["2017-like-1"]
     assert not (output / "test_score.md").exists()
-    # A changed cache does not clear the marker.
+    assert not (tmp_path / "test_set_scored.json.lock").exists()
+    saved = marker.read_text(encoding="utf-8")
     manifest = cache / "2017-like" / "test" / "manifest.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["note"] = "cache changed after the crash"
@@ -686,7 +692,8 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
         )
     assert caught.value.code == 1
     assert "scored once" in capsys.readouterr().err
-    assert not marker.is_file()
+    assert marker.read_text(encoding="utf-8") == saved
+    assert entry["status"] == "pending"
 
 
 def test_two_concurrent_score_runs_let_one_through(
@@ -1351,10 +1358,212 @@ def test_score_test_refuses_a_non_numeric_cut(
         )
     assert caught.value.code == 1
     err = capsys.readouterr().err
-    assert "must be a number" in err
+    assert "finite number" in err
     assert "Nothing was written" in err
     assert not (output / "test_score.md").exists()
     assert _ledger_text(scored_test_set_ledger) == before
+    for bad in ("nan", "inf", "-inf"):
+        payload["min_g_minus_r_rise"] = bad
+        cuts.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(SystemExit) as caught:
+            main(
+                [
+                    "recall",
+                    "--score-test",
+                    "--cuts",
+                    str(cuts),
+                    "--output",
+                    str(output),
+                    "--cache",
+                    str(cache),
+                ]
+            )
+        assert caught.value.code == 1
+        assert "finite number" in capsys.readouterr().err
+        assert _ledger_text(scored_test_set_ledger) == before
+
+
+def test_a_zero_byte_events_table_is_refused(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty events file is a clean refusal, not a pandas traceback."""
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    events = cache / "2017-like" / "test" / "events.csv"
+    events.write_bytes(b"")
+    output = tmp_path / "out"
+    output.mkdir()
+    before = _ledger_text(scored_test_set_ledger)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert "empty" in err
+    assert "Nothing was written" in err
+    assert "Traceback" not in err
+    assert not (output / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == before
+
+
+def test_a_crash_after_the_score_file_keeps_the_pending_ids_blocked(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A kill after the score file and before completion still blocks a rescore.
+
+    The pending entry stays. A larger draw of the same seed is refused
+    without --rescore-decision, and the ledger bytes do not change.
+    An unused decision appends a new entry and leaves the pending one.
+    """
+    import shutil
+
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+
+    from kilonova_hunter import cli as cli_mod
+
+    real_complete = cli_mod._complete_pending_score
+
+    def killed(test_hash, score_path):
+        raise RuntimeError("killed before the ledger was completed")
+
+    monkeypatch.setattr(cli_mod, "_complete_pending_score", killed)
+    with pytest.raises(RuntimeError, match="killed before"):
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert (output / "test_score.md").is_file()
+    saved = _ledger_text(scored_test_set_ledger)
+    pending = json.loads(saved)
+    old_hash, old_entries = next(iter(pending["sets"].items()))
+    assert old_entries[0]["status"] == "pending"
+    assert "score_sha256" not in old_entries[0]
+    assert not (tmp_path / "test_set_scored.json.lock").exists()
+
+    bigger = tmp_path / "bigger"
+    shutil.copytree(cache, bigger)
+    for population in ("2017-like", "realistic"):
+        folder = bigger / population / "test"
+        (folder / "events.csv").write_text(
+            _events_table(f"{population}-1", f"{population}-2", population=population),
+            encoding="utf-8",
+        )
+        manifest_path = folder / "manifest.json"
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["n_simulated"] = 2
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    refused = tmp_path / "refused"
+    refused.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(refused),
+                "--cache",
+                str(bigger),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "object ids" in capsys.readouterr().err
+    assert not (refused / "test_score.md").exists()
+    assert _ledger_text(scored_test_set_ledger) == saved
+    monkeypatch.setattr(cli_mod, "_complete_pending_score", real_complete)
+
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--rescore-decision",
+            "PM-after-crash",
+            "--output",
+            str(approved),
+            "--cache",
+            str(bigger),
+        ]
+    )
+    again = json.loads(_ledger_text(scored_test_set_ledger))
+    assert again["sets"][old_hash][0] == old_entries[0]
+    assert again["sets"][old_hash][0]["status"] == "pending"
+    new_entries = next(
+        entries for key, entries in again["sets"].items() if key != old_hash
+    )
+    assert new_entries[-1]["status"] == "complete"
+    assert new_entries[-1]["decision_id"] == "PM-after-crash"
+    assert "score_sha256" in new_entries[-1]
+
+
+def test_a_stale_score_lock_is_left_for_a_person_to_remove(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A lock that is already there is not deleted, and the ledger is not touched."""
+    from kilonova_hunter.cli import _score_lock_path
+
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    lock = _score_lock_path()
+    lock.write_text("stale\n", encoding="utf-8")
+    before = _ledger_text(scored_test_set_ledger)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--output",
+                str(output),
+                "--cache",
+                str(cache),
+            ]
+        )
+    assert caught.value.code == 1
+    err = capsys.readouterr().err
+    assert str(lock) in err
+    assert "by hand" in err
+    assert lock.read_text(encoding="utf-8") == "stale\n"
+    assert _ledger_text(scored_test_set_ledger) == before
+    assert not (output / "test_score.md").exists()
 
 
 def _grid_argv(tmp_path: Path) -> list[str]:
@@ -1531,11 +1740,11 @@ def test_grid_exits_0_when_the_copy_verdict_passes(
 
 
 def _proxy_alerts() -> pd.DataFrame:
-    """Two nights, so the even night is tuning and the odd night is test."""
+    """Two nights. 60000 is the tuning night and 60001 is the other night."""
     return pd.DataFrame(
         [
             {
-                "i:objectId": "a",
+                "i:objectId": "tuning-object",
                 "i:jd": 2450000.5,
                 "i:fid": 1,
                 "i:magpsf": 20.0,
@@ -1544,7 +1753,7 @@ def _proxy_alerts() -> pd.DataFrame:
                 "night": 60000,
             },
             {
-                "i:objectId": "b",
+                "i:objectId": "test-night-object",
                 "i:jd": 2450001.5,
                 "i:fid": 1,
                 "i:magpsf": 20.0,
@@ -1556,18 +1765,38 @@ def _proxy_alerts() -> pd.DataFrame:
     )
 
 
-def _assert_tuning_written_and_test_flags_refused(output: Path) -> None:
+def _assert_unfrozen_fetch_is_tuning_only(
+    output: Path, printed: str, logged: str
+) -> None:
+    """No other-night row, count, or total in the files, stdout, or log."""
     text = (output / "real_alert_slices.json").read_text(encoding="utf-8")
     document = json.loads(text)
+    assert "test" not in document
+    assert "test" not in document["flag_counts"]
     assert "n_flagged" in document["flag_counts"]["tuning"]
-    assert "refused" in document["flag_counts"]["test"]
-    assert (output / "ztf_proxy_alerts.csv").is_file()
+    assert "60001" not in text
+    assert "test-night-object" not in text
+    tuning_csv = (output / "ztf_proxy_alerts_tuning.csv").read_text(encoding="utf-8")
+    assert "tuning-object" in tuning_csv
+    assert "60001" not in tuning_csv
+    assert "test-night-object" not in tuning_csv
+    assert not (output / "ztf_proxy_alerts.csv").exists()
+    blob = printed + "\n" + logged
+    assert "Test:" not in blob
+    assert "60001" not in blob
+    assert "test-night-object" not in blob
 
 
-def test_fetch_alerts_writes_tuning_before_cuts_are_frozen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_unfrozen_fetch_writes_no_test_night_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Tuning slices are written without frozen cuts. Test-slice flags are not."""
+    """An unfrozen fetch stores tuning nights and no other-night total."""
+    import logging
+
+    caplog.set_level(logging.DEBUG)
     monkeypatch.setattr(
         "kilonova_hunter.alerts.fetch_class_between",
         lambda start, stop, **kwargs: _proxy_alerts(),
@@ -1586,7 +1815,10 @@ def test_fetch_alerts_writes_tuning_before_cuts_are_frozen(
             "2024-06-02",
         ]
     )
-    _assert_tuning_written_and_test_flags_refused(output)
+    captured = capsys.readouterr()
+    _assert_unfrozen_fetch_is_tuning_only(
+        output, captured.out + captured.err, caplog.text
+    )
 
     unfrozen = tmp_path / "unfrozen.json"
     unfrozen.write_text(json.dumps({"frozen": False}), encoding="utf-8")
@@ -1606,7 +1838,10 @@ def test_fetch_alerts_writes_tuning_before_cuts_are_frozen(
             "2024-06-02",
         ]
     )
-    _assert_tuning_written_and_test_flags_refused(still)
+    captured = capsys.readouterr()
+    _assert_unfrozen_fetch_is_tuning_only(
+        still, captured.out + captured.err, caplog.text
+    )
 
     cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
     frozen_out = tmp_path / "frozen"
@@ -1631,17 +1866,27 @@ def test_fetch_alerts_writes_tuning_before_cuts_are_frozen(
     assert "n_flagged" in frozen["flag_counts"]["test"]
     assert "refused" not in frozen["flag_counts"]["test"]
     assert "n_flagged" in frozen["flag_counts"]["tuning"]
+    full = pd.read_csv(frozen_out / "ztf_proxy_alerts.csv")
+    tuning = pd.read_csv(frozen_out / "ztf_proxy_alerts_tuning.csv")
+    assert set(full["i:objectId"]) == {"tuning-object", "test-night-object"}
+    assert set(tuning["i:objectId"]) == {"tuning-object"}
 
 
 def test_cuts_file_errors_are_not_frozen_and_do_not_raise(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A list, missing keys, or bad JSON is not frozen, and does not traceback.
 
-    Fetch still writes the tuning slice. Test-slice flag counts stay refused.
+    Fetch still writes the tuning nights. It does not store another night's total.
     """
+    import logging
+
     from kilonova_hunter.cli import _cuts_are_frozen
 
+    caplog.set_level(logging.DEBUG)
     missing = _frozen_cuts(tmp_path / "missing-keys.json", frozen=True)
     payload = json.loads(missing.read_text(encoding="utf-8"))
     del payload["min_g_minus_r_rise"]
@@ -1682,7 +1927,10 @@ def test_cuts_file_errors_are_not_frozen_and_do_not_raise(
                 "2024-06-02",
             ]
         )
-        _assert_tuning_written_and_test_flags_refused(output)
+        captured = capsys.readouterr()
+        _assert_unfrozen_fetch_is_tuning_only(
+            output, captured.out + captured.err, caplog.text
+        )
 
 
 def _patch_grid_draws(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1744,7 +1992,7 @@ def _run_grid_fixture(cache: Path, output: Path, *, tuning_only: bool) -> None:
     ]
     if tuning_only:
         argv.append("--tuning-only")
-    output.mkdir(parents=True)
+    output.mkdir(parents=True, exist_ok=True)
     with pytest.raises(SystemExit) as caught:
         main(argv)
     assert caught.value.code == 2
@@ -1849,3 +2097,144 @@ def test_tuning_only_writes_no_test_split_and_leaves_the_ledger(
     assert _sha256(scored_test_set_ledger) == before_fixture
     assert _sha256(repo_ledger) == before_repo
     assert not claims.exists()
+
+
+_EXPOSURE_NOTE = (
+    "Test-night raw Fink rows were fetched on 2026-11-03 into "
+    "results/ztf_proxy_alerts.csv before the cuts freeze. "
+    "results/real_alert_slices.json in the repo already shows 9 test nights "
+    "and 8,051 test alerts. These totals do not depend on the cuts, and "
+    "they reveal nothing about our flags. No test-slice flag counts were "
+    "examined."
+)
+
+
+def _pick_rows() -> list[dict]:
+    """Two day-3 rows. The flag rate is filled from the tuning alerts."""
+    return [
+        {
+            "recall_judgeable": 0.90,
+            "redder_than_g_minus_r": 0.0,
+            "min_g_minus_r_rise": 0.1,
+            "min_color_separation_days": 0.5,
+            "reddening_window_days": 5.0,
+            "untestable": False,
+        },
+        {
+            "recall_judgeable": 0.80,
+            "redder_than_g_minus_r": 0.4,
+            "min_g_minus_r_rise": 0.2,
+            "min_color_separation_days": 1.0,
+            "reddening_window_days": 2.0,
+            "untestable": False,
+        },
+    ]
+
+
+def _alerts_with_both_nights() -> pd.DataFrame:
+    frame = _proxy_alerts()
+    frame["night_slice"] = ["tuning", "test"]
+    return frame
+
+
+def test_tuning_path_never_counts_a_test_night(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grid, pick, and the Fink count ignore rows from the other night.
+
+    The same count comes back when those rows are removed. The only
+    alerts file opened is the tuning file.
+    """
+    from kilonova_hunter.alerts import average_flags_per_night
+    from kilonova_hunter.grid import pick_with_tuning_alerts
+
+    mixed = _alerts_with_both_nights()
+    tuning_nights = {60000}
+    output = tmp_path / "out"
+    output.mkdir()
+    mixed.to_csv(output / "ztf_proxy_alerts_tuning.csv", index=False)
+    mixed.to_csv(output / "ztf_proxy_alerts.csv", index=False)
+    seen: list[set[int]] = []
+    opened: list[str] = []
+    real_flags = average_flags_per_night
+    real_read = pd.read_csv
+
+    def spy_flags(alerts, thresholds=None):
+        nights = {int(night) for night in alerts["night"].unique()}
+        seen.append(nights)
+        return real_flags(alerts, thresholds)
+
+    def spy_read(path, *args, **kwargs):
+        opened.append(Path(path).name)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr("kilonova_hunter.alerts.average_flags_per_night", spy_flags)
+    monkeypatch.setattr(pd, "read_csv", spy_read)
+    _patch_grid_draws(monkeypatch)
+    _run_grid_fixture(tmp_path / "cache", output, tuning_only=True)
+    mixed_pick = pick_with_tuning_alerts(_pick_rows(), output)
+    summary = (output / "tuning_grid.md").read_text(encoding="utf-8")
+    assert "Tuning-night Fink alerts: 1 nights, 0 new candidates." in summary
+    clean = mixed.loc[mixed["night_slice"] == "tuning"]
+    clean.to_csv(output / "ztf_proxy_alerts_tuning.csv", index=False)
+    clean_pick = pick_with_tuning_alerts(_pick_rows(), output)
+    assert mixed_pick["flags_per_night"] == clean_pick["flags_per_night"]
+    assert mixed_pick["fink_nights"] == clean_pick["fink_nights"] == [60000]
+    assert mixed_pick["fink_n_flagged"] == clean_pick["fink_n_flagged"] == 0
+    assert mixed_pick["redder_than_g_minus_r"] == clean_pick["redder_than_g_minus_r"]
+    assert seen
+    for nights in seen:
+        assert nights <= tuning_nights
+        assert 60001 not in nights
+    assert "ztf_proxy_alerts_tuning.csv" in opened
+    assert "ztf_proxy_alerts.csv" not in opened
+
+
+def test_exposure_note_is_recorded_and_is_not_in_the_score_once_key(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Fink exposure sentence is stored. It does not change the hash."""
+    from kilonova_hunter.cli import _TEST_SET_IDENTITY_KEYS, test_set_sha256
+    from kilonova_hunter.sample import LIKE_KIND, REALISTIC, _read_cache
+
+    repo_root = Path(__file__).resolve().parents[1]
+    note_path = repo_root / "results" / "test_set_exposure.json"
+    recorded = json.loads(note_path.read_text(encoding="utf-8"))
+    assert recorded["exposure_note"] == _EXPOSURE_NOTE
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    ledger = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
+    test_hash, entries = next(iter(ledger["sets"].items()))
+    assert entries[0]["exposure_note"] == _EXPOSURE_NOTE
+    assert entries[0]["exposure_note_path"] == "results/test_set_exposure.json"
+    assert "exposure_note" not in _TEST_SET_IDENTITY_KEYS
+    loaded = []
+    for population in (LIKE_KIND, REALISTIC):
+        manifest, events, curves = _read_cache(cache / population / "test")
+        loaded.append((population, manifest, events, curves))
+    assert test_set_sha256(loaded) == test_hash
+    for _population, manifest, _events, _curves in loaded:
+        manifest["exposure_note"] = "a different sentence"
+    assert test_set_sha256(loaded) == test_hash
+    monkeypatch.setattr(
+        "kilonova_hunter.cli._fink_exposure_note",
+        lambda: ("a different sentence", "results/test_set_exposure.json"),
+    )
+    assert test_set_sha256(loaded) == test_hash

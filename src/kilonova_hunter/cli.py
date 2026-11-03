@@ -180,8 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--fetch-alerts",
         action="store_true",
         help=(
-            "Download Fink ZTF alerts (class Unknown) and write "
-            "results/real_alert_slices.json. The slices are a ZTF proxy for Rubin."
+            "Download Fink ZTF alerts (class Unknown), a ZTF proxy for Rubin. "
+            "Writes results/real_alert_slices.json and "
+            "results/ztf_proxy_alerts_tuning.csv. Until the cuts are frozen, "
+            "only tuning-night rows are written. A frozen cuts file also "
+            "writes results/ztf_proxy_alerts.csv."
         ),
     )
     recall.add_argument(
@@ -198,9 +201,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             'JSON object of frozen cuts: "frozen": true and the four '
-            "cut numbers. --score-test requires it. --fetch-alerts uses "
-            "it only to allow test-slice flag counts; tuning slices are "
-            "still written when it is missing."
+            "cut numbers. --score-test requires it. --fetch-alerts writes "
+            "tuning-night rows either way. Rows and counts from the other "
+            "nights are written only when this file is frozen."
         ),
     )
     recall.add_argument(
@@ -372,17 +375,23 @@ def _cuts_are_frozen(path: Path | None) -> tuple[bool, str]:
 
 
 def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) -> None:
-    """Download the ZTF proxy slices and write the JSON.
+    """Download the ZTF proxy and write the tuning rows.
 
-    Tuning-slice flag counts are always written. Test-slice flag counts
-    are written only when ``cuts`` is frozen. An unfrozen or missing
-    cuts file does not block the tuning slice.
+    The nights are labeled immediately after the download. Unless the
+    cuts file is frozen, rows from the other nights are dropped before
+    any file is written and before anything is printed. A frozen file
+    may also write those rows, as the earlier fetch did.
     """
     from datetime import date
 
     from kilonova_hunter.alerts import (
+        FULL_ALERTS_FILENAME,
+        TUNING_ALERTS_FILENAME,
         build_slice_document,
+        build_tuning_only_document,
         fetch_class_between,
+        label_night_slices,
+        tuning_only_alerts,
         write_slice_document,
     )
 
@@ -394,36 +403,52 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
         _fail("alert dates must look like 2024-06-01.")
     if stop_day < start_day:
         _fail("--alert-stop must be on or after --alert-start.")
-    alerts = fetch_class_between(start_day, stop_day)
-    if alerts.empty:
+    fetched = fetch_class_between(start_day, stop_day)
+    if fetched.empty:
         _fail("Fink returned no alerts for that date range.")
-    document = build_slice_document(
-        alerts,
-        start=start_day,
-        stop=stop_day,
-        include_test_flag_counts=frozen,
-    )
+    # Label, then drop the other nights, before any write or print.
+    labeled = label_night_slices(fetched)
+    tuning_rows = tuning_only_alerts(labeled)
+    if tuning_rows.empty:
+        _fail("Fink returned no tuning-night alerts for that date range.")
+    if frozen:
+        document = build_slice_document(
+            labeled,
+            start=start_day,
+            stop=stop_day,
+            include_test_flag_counts=True,
+        )
+    else:
+        document = build_tuning_only_document(
+            tuning_rows,
+            start=start_day,
+            stop=stop_day,
+        )
     path = output / "real_alert_slices.json"
     write_slice_document(document, path)
-    alerts_path = output / "ztf_proxy_alerts.csv"
-    alerts.to_csv(alerts_path, index=False)
+    tuning_path = output / TUNING_ALERTS_FILENAME
+    tuning_rows.to_csv(tuning_path, index=False)
+    if frozen:
+        full_path = output / FULL_ALERTS_FILENAME
+        labeled.to_csv(full_path, index=False)
     tuning = document["tuning"]
-    test = document["test"]
     print(f"Label: {document['label']}")
     print(f"Wrote {path}")
-    print(
-        f"Tuning: {tuning['n_nights']} nights, {tuning['n_alerts']} alerts. "
-        f"Test: {test['n_nights']} nights, {test['n_alerts']} alerts."
-    )
+    print(f"Wrote {tuning_path}")
+    print(f"Tuning: {tuning['n_nights']} nights, {tuning['n_alerts']} alerts.")
+    if frozen:
+        test = document["test"]
+        print(f"Test: {test['n_nights']} nights, {test['n_alerts']} alerts.")
     print(document["night_formula"])
 
 
 def _run_score_test(args) -> None:
     """Score the cached test split once. Refuses to simulate or to retune.
 
-    The command stops unless three things are true: no test score has
-    been written yet, the cuts file says it is frozen, and the cache
-    manifest names the SFD dust map. ``--cache`` chooses the cache.
+    The command stops unless the cuts file is frozen and the cache
+    manifest names the SFD dust map. A pending ledger entry counts as
+    scored: the set is consumed by a crash, and another score is only
+    possible with ``--rescore-decision``. ``--cache`` chooses the cache.
     """
     import json
 
@@ -454,9 +479,15 @@ def _run_score_test(args) -> None:
     decision_id = raw_decision.strip() if isinstance(raw_decision, str) else ""
     decision_id = decision_id or None
     try:
-        combo = {name: float(cuts[name]) for name in _FROZEN_CUT_KEYS}
+        combo = {}
+        for name in _FROZEN_CUT_KEYS:
+            value = float(cuts[name])
+            # float("nan") and float("inf") succeed. They are not cuts.
+            if value != value or value in (float("inf"), float("-inf")):
+                raise ValueError
+            combo[name] = value
     except (TypeError, ValueError):
-        _fail("Each cut in the cuts file must be a number. Nothing was written.")
+        _fail("Each cut in the cuts file must be a finite number. Nothing was written.")
     cache = Path(args.cache)
     expected_map = dust_map_label()
     loaded_sets = []
@@ -481,7 +512,10 @@ def _run_score_test(args) -> None:
                 f"No complete cached test split for {population} in {cache}. "
                 "Simulate it before scoring. This command does not simulate."
             )
-        loaded = _read_cache(folder)
+        try:
+            loaded = _read_cache(folder)
+        except ValueError as error:
+            _fail(f"{error} Nothing was written.")
         if loaded is None:
             _fail(
                 f"No cached test split for {population} in {cache}. "
@@ -505,72 +539,58 @@ def _run_score_test(args) -> None:
     # redback version, diffusion fix, or dust map differ. An object id
     # already scored in that population is the same set even when the
     # hash differs, for example a larger sample_size on the same seed.
+    # A pending ledger entry counts as scored: the set is consumed by a
+    # crash, and another score needs --rescore-decision.
     # This runs before the cache-version check so a rescore is the
     # Rescore refusal, not a provenance mismatch.
     identity = test_set_sha256(loaded_sets)
-    overlap = _overlap_count(loaded_sets)
-    already = _test_set_already_claimed(identity)
-    if decision_id is None:
-        if already:
-            _refuse_rescore(identity, fresh_cache=True)
-        if overlap:
-            _fail(
-                f"{overlap} object ids in this test set were already scored "
-                f"in the same population. {_RESCORE_NEEDS_A_DECISION}"
-            )
-    elif not already and overlap == 0:
-        _fail(
-            "--rescore-decision was given, but this test set has not been "
-            "scored and none of its object ids overlap a scored population. "
-            "Nothing was written."
-        )
-    elif _decision_already_used(identity, loaded_sets, decision_id):
-        _fail(
-            f"Decision {decision_id} was already used for this test set. "
-            f"{_RESCORE_NEEDS_A_DECISION}"
-        )
-    for population, manifest, _events, _curves in loaded_sets:
-        reason = cache_refusal_reason(manifest)
-        if reason is not None:
-            _fail(f"The {population} test cache is refused: {reason}")
-        if (
-            manifest.get("dust_mode") != "sfd"
-            or manifest.get("dust_map") != expected_map
-        ):
-            _fail(
-                f"The {population} test cache has no recorded SFD provenance. "
-                f"dust_map is {manifest.get('dust_map')!r}. "
-                f"It has to be {expected_map!r}."
-            )
-    # Claim the once-only marker before any scoring. The key is the test
-    # set itself, stored outside the cache, so a fresh --cache cannot
-    # reset it. The create is exclusive. A crash still leaves the claim.
-    _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
-    by_population = {}
-    for population, manifest, events, curves in loaded_sets:
-        by_population[population] = score_with_frozen_cuts(
-            events,
-            curves,
+    # Take the lock before any ledger or score file is written. A lock
+    # that is already there is left in place. The run that creates it
+    # removes it in ``finally``. A pending entry counts as scored.
+    lock = _acquire_score_lock()
+    try:
+        _refuse_unless_score_is_allowed(identity, loaded_sets, decision_id)
+        for population, manifest, _events, _curves in loaded_sets:
+            reason = cache_refusal_reason(manifest)
+            if reason is not None:
+                _fail(f"The {population} test cache is refused: {reason}")
+            if (
+                manifest.get("dust_mode") != "sfd"
+                or manifest.get("dust_map") != expected_map
+            ):
+                _fail(
+                    f"The {population} test cache has no recorded SFD provenance. "
+                    f"dust_map is {manifest.get('dust_map')!r}. "
+                    f"It has to be {expected_map!r}."
+                )
+        _write_pending_score(
+            identity,
             combo,
-            population=population,
-            status=str(manifest.get("status", "ready")),
+            loaded_sets,
+            git_sha=_git_sha(),
+            scored_at=_scored_at(),
+            decision_id=decision_id,
         )
-    text = format_test_score(
-        by_population,
-        dry_run=False,
-        provisional=bool(cuts.get("provisional", False)),
-    )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(text + "\n", encoding="utf-8")
-    _record_scored_test_set(
-        identity,
-        combo,
-        loaded_sets,
-        git_sha=_git_sha(),
-        scored_at=_scored_at(),
-        decision_id=decision_id,
-        score_path=destination,
-    )
+        _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
+        by_population = {}
+        for population, manifest, events, curves in loaded_sets:
+            by_population[population] = score_with_frozen_cuts(
+                events,
+                curves,
+                combo,
+                population=population,
+                status=str(manifest.get("status", "ready")),
+            )
+        text = format_test_score(
+            by_population,
+            dry_run=False,
+            provisional=bool(cuts.get("provisional", False)),
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text + "\n", encoding="utf-8")
+        _complete_pending_score(identity, destination)
+    finally:
+        _release_score_lock(lock)
     print(text)
 
 
@@ -603,6 +623,20 @@ def _repo_root() -> Path:
         f"pyproject.toml was not found in {root}."
     )
     return root
+
+
+def _fink_exposure_note() -> tuple[str, str]:
+    """The committed note that the score-once key does not hash.
+
+    Test-night Fink rows were downloaded before the cuts were frozen.
+    The sentence lives in ``results/test_set_exposure.json``. A ledger
+    entry copies it. The identity hash does not.
+    """
+    import json
+
+    relative = Path("results") / "test_set_exposure.json"
+    payload = json.loads((_repo_root() / relative).read_text(encoding="utf-8"))
+    return str(payload["exposure_note"]), relative.as_posix()
 
 
 def test_set_scored_path() -> Path:
@@ -674,17 +708,39 @@ def _ledger_payload() -> dict:
     return payload
 
 
+def _ids_in_entry(entry: dict, scored: dict[str, set[str]]) -> None:
+    for population, ids in (entry.get("object_ids") or {}).items():
+        scored.setdefault(str(population), set()).update(str(item) for item in ids)
+
+
 def _previously_scored_ids() -> dict[str, set[str]]:
-    """Object ids already scored, grouped by population name."""
+    """Object ids already scored, grouped by population name.
+
+    A pending entry counts as scored. The set is consumed by a crash.
+    Another score of those ids needs ``--rescore-decision``. Claim files
+    are read as well as the ledger, so a claim that has the ids still
+    blocks if the ledger write did not finish.
+    """
     scored: dict[str, set[str]] = {}
     for entries in _ledger_payload().get("sets", {}).values():
         if isinstance(entries, dict):
             entries = [entries]
         for entry in entries:
-            for population, ids in (entry.get("object_ids") or {}).items():
-                scored.setdefault(str(population), set()).update(
-                    str(item) for item in ids
-                )
+            # pending and complete are the same for this check.
+            _ids_in_entry(entry, scored)
+    claim_dir = test_set_claim_dir()
+    if claim_dir.is_dir():
+        import json
+
+        for path in claim_dir.iterdir():
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                _ids_in_entry(payload, scored)
     return scored
 
 
@@ -795,7 +851,98 @@ def _write_ledger(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
-def _record_scored_test_set(
+def _score_lock_path() -> Path:
+    """Exclusive lock next to the ledger. A stale one is removed by hand."""
+    ledger = test_set_scored_path()
+    return ledger.with_name(f"{ledger.name}.lock")
+
+
+def _acquire_score_lock() -> int:
+    """Create the lock, or refuse without deleting a lock that is already there.
+
+    There is no age check and no automatic removal. The message names
+    the path so a person can confirm no run is active and delete it.
+    """
+    import os
+
+    path = _score_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        descriptor = os.open(path, flags, 0o644)
+    except FileExistsError:
+        _fail(
+            f"The score lock {path} is already present. "
+            "Check that no scoring run is active, then remove that file "
+            "by hand. Nothing was written."
+        )
+    os.write(descriptor, f"pid {os.getpid()}\n".encode())
+    return descriptor
+
+
+def _release_score_lock(descriptor: int) -> None:
+    """Remove the lock this run created. Does not run if acquire refused."""
+    import os
+
+    path = _score_lock_path()
+    os.close(descriptor)
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+
+
+def _ledger_entries(current: object) -> list:
+    if current is None:
+        return []
+    if isinstance(current, dict):
+        return [current]
+    return list(current)
+
+
+def _object_ids_by_population(loaded_sets: list) -> dict[str, list[str]]:
+    return {
+        population: _object_ids(events)
+        for population, _manifest, events, _curves in loaded_sets
+    }
+
+
+def _population_specs(loaded_sets: list) -> dict:
+    return {
+        population: _population_spec(manifest)
+        for population, manifest, _events, _curves in loaded_sets
+    }
+
+
+def _refuse_unless_score_is_allowed(
+    identity: str, loaded_sets: list, decision_id: str | None
+) -> None:
+    """Stop unless this score is the first, or an unused decision approves it."""
+    overlap = _overlap_count(loaded_sets)
+    already = _test_set_already_claimed(identity)
+    if decision_id is None:
+        if already:
+            _refuse_rescore(identity, fresh_cache=True)
+        if overlap:
+            _fail(
+                f"{overlap} object ids in this test set were already scored "
+                f"in the same population. {_RESCORE_NEEDS_A_DECISION}"
+            )
+        return
+    if not already and overlap == 0:
+        _fail(
+            "--rescore-decision was given, but this test set has not been "
+            "scored and none of its object ids overlap a scored population. "
+            "Nothing was written."
+        )
+    if _decision_already_used(identity, loaded_sets, decision_id):
+        _fail(
+            f"Decision {decision_id} was already used for this test set. "
+            f"{_RESCORE_NEEDS_A_DECISION}"
+        )
+
+
+def _write_pending_score(
     test_hash: str,
     combo: dict[str, float],
     loaded_sets: list,
@@ -803,52 +950,65 @@ def _record_scored_test_set(
     git_sha: str,
     scored_at: str,
     decision_id: str | None = None,
-    score_path: Path,
 ) -> None:
-    """Append one scoring entry after the score file exists.
+    """Append a pending entry before any score file is written.
 
-    A later entry does not replace the first. The entry names the score
-    file and its sha256.
+    A pending entry counts as scored. The set is consumed by a crash.
+    Rescore is only via ``--rescore-decision``. This function does not
+    delete or rewrite an older pending entry. An approved rescore
+    appends another entry and leaves the pending one in the history.
+    The run that wrote this entry marks it complete after the score
+    file exists.
     """
     import hashlib
     import json
 
-    path = test_set_scored_path()
-    if path.is_file():
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    else:
-        payload = {"sets": {}}
     cuts = json.dumps(combo, sort_keys=True, separators=(",", ":"))
-    score_bytes = score_path.read_bytes()
+    note, note_path = _fink_exposure_note()
     entry = {
+        "status": "pending",
+        "test_set_sha256": test_hash,
         "cuts_sha256": hashlib.sha256(cuts.encode("utf-8")).hexdigest(),
         "cuts": combo,
         "provenance": _provenance(loaded_sets),
-        "population_spec": {
-            population: _population_spec(manifest)
-            for population, manifest, _events, _curves in loaded_sets
-        },
-        "object_ids": {
-            population: _object_ids(events)
-            for population, _manifest, events, _curves in loaded_sets
-        },
+        "population_spec": _population_specs(loaded_sets),
+        "object_ids": _object_ids_by_population(loaded_sets),
         "git_sha": git_sha,
         "scored_at": scored_at,
-        "score_path": str(score_path),
-        "score_sha256": hashlib.sha256(score_bytes).hexdigest(),
+        "exposure_note": note,
+        "exposure_note_path": note_path,
     }
     if decision_id:
         entry["decision_id"] = decision_id
-    current = payload.setdefault("sets", {}).get(test_hash)
-    if current is None:
-        entries: list = []
-    elif isinstance(current, dict):
-        entries = [current]
-    else:
-        entries = list(current)
+    payload = _ledger_payload()
+    entries = _ledger_entries(payload.setdefault("sets", {}).get(test_hash))
     entries.append(entry)
     payload["sets"][test_hash] = entries
-    _write_ledger(path, payload)
+    _write_ledger(test_set_scored_path(), payload)
+
+
+def _complete_pending_score(test_hash: str, score_path: Path) -> None:
+    """Mark the pending entry this run appended as complete.
+
+    Only the last pending entry for this hash is updated. Older pending
+    entries stay pending. The score path and its sha256 are recorded
+    here, after the score file exists.
+    """
+    import hashlib
+
+    payload = _ledger_payload()
+    entries = _ledger_entries(payload.get("sets", {}).get(test_hash))
+    if not entries or entries[-1].get("status") != "pending":
+        _fail(
+            "The pending score entry is missing, so the score was not "
+            "recorded as complete. Nothing else was changed."
+        )
+    score_bytes = score_path.read_bytes()
+    entries[-1]["status"] = "complete"
+    entries[-1]["score_path"] = str(score_path)
+    entries[-1]["score_sha256"] = hashlib.sha256(score_bytes).hexdigest()
+    payload["sets"][test_hash] = entries
+    _write_ledger(test_set_scored_path(), payload)
 
 
 def _claim_score_once_marker(
@@ -865,42 +1025,46 @@ def _claim_score_once_marker(
     its own claim. Changing the cache version, redback version, diffusion
     fix, or dust map does not. A rescore of the same set is appended
     only when ``decision_id`` names the approving decision. The first
-    entry stays.
+    entry stays. The claim stores the population and the object ids.
+    This looks at the claim file only. The pending ledger row for this
+    run is already written, and it must not block its own claim.
     """
     import json
     import os
 
     test_hash = test_set_sha256(loaded_sets)
-    already = _test_set_already_claimed(test_hash)
-    if already and not decision_id:
-        _refuse_rescore(test_hash, fresh_cache=True)
+    claim = test_set_claim_dir() / test_hash
+    if claim.is_file():
+        if not decision_id:
+            _refuse_rescore(test_hash, fresh_cache=True)
+        return
     git_sha = _git_sha()
     scored_at = _scored_at()
-    if not already:
-        claim = test_set_claim_dir() / test_hash
-        claim.parent.mkdir(parents=True, exist_ok=True)
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        try:
-            descriptor = os.open(claim, flags, 0o644)
-        except FileExistsError:
-            _refuse_rescore(test_hash, fresh_cache=False)
-        body = (
-            json.dumps(
-                {
-                    "test_set_sha256": test_hash,
-                    "cuts": combo,
-                    "provenance": _provenance(loaded_sets),
-                    "git_sha": git_sha,
-                    "scored_at": scored_at,
-                },
-                indent=2,
-            )
-            + "\n"
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        descriptor = os.open(claim, flags, 0o644)
+    except FileExistsError:
+        _refuse_rescore(test_hash, fresh_cache=False)
+    body = (
+        json.dumps(
+            {
+                "test_set_sha256": test_hash,
+                "population_spec": _population_specs(loaded_sets),
+                "object_ids": _object_ids_by_population(loaded_sets),
+                "cuts": combo,
+                "provenance": _provenance(loaded_sets),
+                "git_sha": git_sha,
+                "scored_at": scored_at,
+            },
+            indent=2,
         )
-        try:
-            os.write(descriptor, body.encode("utf-8"))
-        finally:
-            os.close(descriptor)
+        + "\n"
+    )
+    try:
+        os.write(descriptor, body.encode("utf-8"))
+    finally:
+        os.close(descriptor)
 
 
 def _run_grid(args) -> None:

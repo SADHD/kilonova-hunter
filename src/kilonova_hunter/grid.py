@@ -208,6 +208,34 @@ def pick_with_flag_limit(rows: list[dict], settings: dict | None = None) -> dict
     return chosen
 
 
+def pick_with_tuning_alerts(
+    rows: list[dict],
+    alerts_dir: Path | str,
+    settings: dict | None = None,
+) -> dict:
+    """Pick with the flag limit, counting tuning-night Fink alerts only.
+
+    The rate comes from ``ztf_proxy_alerts_tuning.csv``. Rows marked as
+    the other night slice are not counted. ``ztf_proxy_alerts.csv`` is
+    not opened.
+    """
+    from kilonova_hunter.alerts import average_flags_per_night, read_tuning_alerts
+
+    alerts = read_tuning_alerts(alerts_dir)
+    summary = average_flags_per_night(alerts)
+    rated = [dict(row, flags_per_night=summary["flags_per_night"]) for row in rows]
+    chosen = pick_with_flag_limit(rated, settings)
+    chosen["fink_nights"] = _nights_in(alerts)
+    chosen["fink_n_flagged"] = summary["n_flagged"]
+    return chosen
+
+
+def _nights_in(alerts: pd.DataFrame) -> list[int]:
+    if alerts.empty or "night" not in alerts.columns:
+        return []
+    return sorted(int(night) for night in alerts["night"].unique())
+
+
 def chance_wilson_lower_at_least(
     successes_total: int,
     true_rate: float,
@@ -577,13 +605,15 @@ def recall_with_bluer_color(
     day: float = 3.0,
     status: str = "ready",
 ) -> dict:
-    """Recompute recall after shifting 2017-like g-r bluer by ``offset``.
+    """Recompute recall after shifting g-r bluer by ``offset``.
 
-    Subtracting ``offset`` magnitudes from g-r is the sensitivity for
-    the measured model-minus-AT2017gfo color gap. The default is +0.4
-    mag. The epoch values are +0.37 at 1.5 d, +0.47 at 2 d, and +0.42
-    at 3 d, so the offset sits in 0.3 to 0.47. A constant shift does
-    not change the reddening rise. The tuning grid prints this shift.
+    The shift applies to the population that was passed in, both the
+    2017-like set and the realistic set. Subtracting ``offset``
+    magnitudes from g-r is the sensitivity for the measured
+    model-minus-AT2017gfo color gap. The default is +0.4 mag. The
+    epoch values are +0.37 at 1.5 d, +0.47 at 2 d, and +0.42 at 3 d,
+    so the offset sits in 0.3 to 0.47. A constant shift does not
+    change the reddening rise. The tuning grid prints this shift.
     It is not used to pick a cut.
     """
     from dataclasses import replace
@@ -1565,6 +1595,32 @@ def summarize_grid(
     return "\n".join(lines) + "\n"
 
 
+def _tuning_fink_report(output_dir: Path) -> str:
+    """Fink counts from the tuning file, when that file is present.
+
+    Missing file means the count is left out. The full alerts file is
+    not read. The count does not pick a cut.
+    """
+    from kilonova_hunter.alerts import (
+        TUNING_ALERTS_FILENAME,
+        average_flags_per_night,
+        read_tuning_alerts,
+    )
+
+    if not (output_dir / TUNING_ALERTS_FILENAME).is_file():
+        return ""
+    alerts = read_tuning_alerts(output_dir)
+    summary = average_flags_per_night(alerts)
+    nights = int(summary["n_nights"])
+    flagged = int(summary["n_flagged"])
+    return (
+        "## Fink tuning nights\n\n"
+        f"Tuning-night Fink alerts: {nights} nights, {flagged} new candidates. "
+        "Nights outside the tuning slice are not counted. "
+        "This count is not used to pick a cut.\n"
+    )
+
+
 def _grid_run_header() -> str:
     """Git SHA and redback version, printed at the top of the grid summary."""
     from kilonova_hunter.cli import _git_sha
@@ -1687,6 +1743,9 @@ def run_tuning_grid(
             + "\n\n"
             + format_color_sensitivity_scope(prepared_for_examples, placeholder)
         )
+    fink = _tuning_fink_report(destination)
+    if fink:
+        text = text.rstrip() + "\n\n" + fink
     text = _grid_run_header() + text
     (destination / "tuning_grid.md").write_text(text, encoding="utf-8")
     return GridRun(
