@@ -31,7 +31,17 @@ that bandpass. Otherwise the nearest sncosmo bandpass is used and named.
 | --- | --- | --- |
 | DECam | desg, desr, desi | exact |
 | Pan-STARRS PS1 | ps1::g, ps1::r, ps1::i | exact |
-| T80S, LCO Sinistro, Swope, LDSS, IMACS, GROND, SkyMapper, REM ROS2, OmegaCam, AST3-2, VLT FORS/VIMOS/X-shooter/Danish 1.5 m, Gemini, Prompt, Tripol5, Zadko, and the other rows | sdssg, sdssr, sdssi | nearest. sncosmo has no bandpass for that instrument |
+| Swope | cspg, cspr, cspi | exact. CSP g/r/i are in sncosmo |
+| SkyMapper | sdssg, sdssr, sdssi | nearest. The SkyMapper bandpasses cannot be downloaded (the SVO source server returns an error; an earlier check saw HTTP 500, and this environment gets HTTP 403) |
+| T80S, LCO Sinistro, LDSS, IMACS, GROND, REM ROS2, OmegaCam, AST3-2, VLT FORS/VIMOS/X-shooter/Danish 1.5 m, Gemini, Prompt, Tripol5, Zadko, and the other rows | sdssg, sdssr, sdssi | nearest. sncosmo has no bandpass for that instrument |
+
+CSP minus SDSS is negative in g: the CSP bandpass is brighter. At the
+three Swope g epochs the difference is −0.06 to −0.12 mag. From day 0.4
+to day 8 the model difference runs from about −0.01 to −0.12 mag. The
+per-epoch Swope differences are in `docs/at2017gfo_csp_minus_sdss.csv`.
+The scripts that write both residual tables are
+`scripts/at2017gfo_bandpass_residuals.py`. The bolometric ratios come
+from `scripts/at2017gfo_bolometric.py`.
 
 Dust is Fitzpatrick 1999, R_V = 3.1, E(B-V) = 0.105, at that bandpass's
 effective wavelength. The LSST comparison uses lsstg, lsstr, and lssti
@@ -58,7 +68,7 @@ after day 6 (+0.35).
 | 0.4–0.8 | +0.68 (n=4) | +0.41 (n=5) | +0.33 (n=6) | model limit, not scored |
 | 0.8–1.5 | +0.304 FAIL | −0.046 PASS | −0.286 PASS | scored |
 | 1.5–3.0 | +0.580 FAIL | +0.191 PASS | +0.098 PASS | scored |
-| 3.0–6.0 | +0.333 FAIL | +0.027 PASS | +0.082 PASS | scored |
+| 3.0–6.0 | +0.333 FAIL | −0.011 PASS | +0.060 PASS | scored |
 | 6.0 and later | +0.303 FAIL | +0.346 FAIL | +0.000 PASS | scored |
 
 The instrument bandpasses do not bring g within 0.3 mag after day 0.8.
@@ -90,33 +100,48 @@ MNRAS 481, 3423, Table B2, column L_int (the trapezoidal bolometric
 luminosity they adopt). The numbers are in
 `docs/at2017gfo_bolometric_waxman2018.csv`. MOSFiT was not run.
 
-The model luminosity is the sum of the three component bolometric
-luminosities from `_one_component_kilonova_model`, with the diffusion
-wrapper on, at the Table 2 center. A ratio below 1 means the model is
-fainter. The magnitude column is how many magnitudes fainter the model
-is (`-2.5 log10(ratio)`).
+An earlier draft called the private `_one_component_kilonova_model` at
+the 12 Waxman times only. That starts the diffusion integral at the
+first data time and makes the model look about 2.7 mag too faint at
+0.5 days. That draft was wrong. The numbers below evaluate the three
+Table 2 components on redback's dense grid (`get_optimal_time_array`
+from 0.01 seconds to 7e6 seconds, 300 requested points, the Waxman
+times included), with the factor-of-2 wrapper, convert source time to
+observer time by (1+z), and interpolate to the data times. The grid
+that comes back has 298 points and starts at 0.01 seconds. 104 of those
+points are before 1 day. The ratios are in
+`docs/at2017gfo_bolometric_model.csv`. The script is
+`scripts/at2017gfo_bolometric.py`.
 
-| day | model / Waxman L_int | model fainter by (mag) |
+A ratio below 1 means the model is fainter. The magnitude column is
+`-2.5 log10(ratio)`. Positive means the model is fainter.
+
+| day | model / Waxman L_int | model minus data (mag) |
 | --- | --- | --- |
-| 0.5 | 0.082 | +2.72 |
-| 0.6 | 0.072 | +2.86 |
-| 0.8 | 0.207 | +1.71 |
-| 1.0 | 0.337 | +1.18 |
-| 1.2 | 0.474 | +0.81 |
-| 1.5 | 0.657 | +0.46 |
-| 2.5 | 0.839 | +0.19 |
-| 3.5 | 0.948 | +0.06 |
-| 4.5 | 1.116 | −0.12 |
-| 5.5 | 1.269 | −0.26 |
-| 6.5 | 1.461 | −0.41 |
-| 7.5 | 1.693 | −0.57 |
+| 0.5 | 0.692 | +0.40 |
+| 0.6 | 0.676 | +0.43 |
+| 0.8 | 0.810 | +0.23 |
+| 1.0 | 0.934 | +0.07 |
+| 1.2 | 1.070 | −0.07 |
+| 1.5 | 1.213 | −0.21 |
+| 2.5 | 1.010 | −0.01 |
+| 3.5 | 1.045 | −0.05 |
+| 4.5 | 1.184 | −0.18 |
+| 5.5 | 1.296 | −0.28 |
+| 6.5 | 1.431 | −0.39 |
+| 7.5 | 1.584 | −0.50 |
 
-The total is low before about day 2. That points to heating, ejecta
-mass, or the missing early shock-cooling term, not to a temperature
-shift alone. At 1.5 days the bolometric deficit is 0.46 mag, the same
-size as the g failure in the 1.5–3.0 day window. By day 3.5 the
-bolometric ratio is about 1. Later the model is brighter than the
-Waxman integral. The g bar is still not met.
+The total light is about right. At 0.5, 0.8, 1.5, and 7.5 days the
+ratio is 0.69, 0.81, 1.21, and 1.58. That is tenths of a magnitude,
+not missing heating or missing mass. The g shortfall is a
+temperature and color problem. The g bar is still not met.
+
+The harness is unaffected. `src/` calls the public model functions
+(`three_component_kilonova_model`, `two_component_kilonova_model`, and
+`two_component_bns_ejecta_relation`). Those functions build this dense
+grid themselves. The largest difference between asking them for the
+visit times and interpolating a separate dense magnitude grid is
+0.0096 mag.
 
 ## (i) Heating, by reading the code, not by running both models
 
@@ -152,13 +177,29 @@ NGC 4993 at 39.5 Mpc is 0.03 mag from 40.
 
 ## (iv) Blue temperature before day 1
 
-With the wrapper, the blue component (0.020 solar masses, 0.266c,
-opacity 0.5, floor 674 K) is about 7000 K at 0.3 days, 6200 K at
-0.5 days, and 5700 K at 0.8 days. The floor is not binding.
+With the wrapper, on the same dense grid, the blue component
+(0.020 solar masses, 0.266c, opacity 0.5, floor 674 K) is 10594 K at
+0.3 source-frame days, 8648 K at 0.5 days, and 6932 K at 0.8 days.
+The floor is not binding.
+
+## Color-shift hook, not run on the grid
+
+`grid.recall_with_bluer_color` shifts the 2017-like g−r bluer by a
+configurable offset and recomputes that recall. The default offset is
++0.4 mag. The measured model-minus-AT2017gfo g−r gap in this window is
++0.37 at 1.5 days, +0.47 at 2 days, and +0.41 at 3 days, so the offset
+sits in 0.3 to 0.47. The tuning grid does not call the hook.
+
+A separate NOT-COUNTED runner,
+`scripts/opacity_prior_sensitivity.py`, redraws the realistic
+opacities from redback's Uniform(1, 30) prior on one batch (index 90,
+24 fakes). It is not the full grid, and those numbers stay out of the
+recall.
 
 ## What Science Lead has to rule
 
 The bar is not met. g is 0.46 mag faint at 1.5–3.0 days on the LSST
 bandpasses, and the instrument bandpasses make that window 0.58 mag.
-The early bolometric luminosity is low as well. Nothing here changes
-the bar, the cuts, or the model.
+The bolometric luminosity is about right, so the g shortfall is a
+temperature and color problem, not missing heating or mass. Nothing
+here changes the bar, the cuts, or the model.
