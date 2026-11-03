@@ -660,6 +660,136 @@ def score_exact_copies(
     }
 
 
+def _rule_word(passed: bool | None) -> str:
+    """passed, failed, or skipped. A skip is not a failure."""
+    if passed is True:
+        return "passed"
+    if passed is False:
+        return "failed"
+    return "skipped"
+
+
+def exact_copy_rule_breakdown(
+    events: pd.DataFrame,
+    curves: pd.DataFrame,
+    combo: dict[str, float],
+    *,
+    day: float = 3.0,
+) -> dict:
+    """Which rule failed on each judgeable exact copy.
+
+    The official judgeable rule is not changed. Reddening that cannot
+    run is recorded as skipped, which is different from a rise that was
+    measured and failed. The window and the gap are the cuts that were
+    used, so a skip can be traced to those two numbers.
+    """
+    by_id = _curves_by_id(curves)
+    settings = thresholds_for(combo)
+    rows: list[dict] = []
+    n_judge = 0
+    n_skipped = 0
+    for row in events.itertuples(index=False):
+        curve = by_id.get(str(row.object_id), pd.DataFrame())
+        judgeable = is_judgeable(curve, day, merger_mjd=float(row.merger_mjd))
+        if not judgeable:
+            continue
+        n_judge += 1
+        visible = light_curve_for_the_filter(curve, day)
+        verdict = is_kilonova_candidate(visible, settings)
+        reddening = _rule_word(verdict.reddening.passed)
+        if reddening == "skipped":
+            n_skipped += 1
+        rows.append(
+            {
+                "object_id": str(row.object_id),
+                "fade": _rule_word(verdict.fade.passed),
+                "g_minus_r": _rule_word(verdict.color.passed),
+                "reddening": reddening,
+                "fade_text": verdict.fade.explanation,
+                "g_minus_r_text": verdict.color.explanation,
+                "reddening_text": verdict.reddening.explanation,
+            }
+        )
+    finding = ""
+    if n_skipped:
+        finding = (
+            f"Finding: reddening could not run on {n_skipped} of {n_judge} "
+            "copies the official judgeable rule accepted. A skip is not a "
+            "failed rise. The color points were not there, so the reddening "
+            "rule was not applied."
+        )
+    return {
+        "day": day,
+        "n_copies": int(len(events)),
+        "n_judgeable": n_judge,
+        "n_judgeable_reddening_skipped": n_skipped,
+        "window_days": float(combo["reddening_window_days"]),
+        "gap_days": float(combo["min_color_separation_days"]),
+        "finding": finding,
+        "rows": rows,
+    }
+
+
+def format_exact_copy_breakdown(report: dict) -> str:
+    """Plain-language breakdown. This is a finding, not a new score."""
+    lines = [
+        "# Exact-copy rule breakdown",
+        "",
+        "Official judgeable definition only. This file does not change it.",
+        "Cuts are the placeholders in config.py, not a cut picked from the grid.",
+        f"Day {report['day']:g}. Reddening window {report['window_days']:g} days, "
+        f"minimum color gap {report['gap_days']:g} days.",
+        f"{report['n_judgeable']} of {report['n_copies']} copies are judgeable.",
+        "",
+    ]
+    if report["finding"]:
+        lines.append(report["finding"])
+        lines.append("")
+    if not report["rows"]:
+        lines.append("No judgeable copies.")
+        return "\n".join(lines) + "\n"
+    lines.append("Judgeable copies:")
+    lines.append("")
+    for row in report["rows"]:
+        lines.append(
+            f"- {row['object_id']}: fade {row['fade']}, "
+            f"g-r cut {row['g_minus_r']}, reddening {row['reddening']}."
+        )
+        lines.append(f"  Fade: {row['fade_text']}")
+        lines.append(f"  g-r: {row['g_minus_r_text']}")
+        lines.append(f"  Reddening: {row['reddening_text']}")
+    return "\n".join(lines) + "\n"
+
+
+def write_cached_exact_copy_breakdown(
+    cache_dir: Path | str,
+    destination: Path | str,
+    *,
+    day: float = 3.0,
+) -> str:
+    """Write the breakdown from a cache that already exists.
+
+    This reads the saved copies. It does not simulate and it does not
+    rerun the grid.
+    """
+    folder = Path(cache_dir)
+    events = pd.read_csv(folder / "events.csv")
+    curves = pd.read_csv(folder / "light_curves.csv")
+    combo = {
+        "redder_than_g_minus_r": THRESHOLDS.redder_than_g_minus_r,
+        "min_g_minus_r_rise": THRESHOLDS.min_g_minus_r_rise,
+        "reddening_window_days": THRESHOLDS.reddening_window_days,
+        "min_color_separation_days": THRESHOLDS.min_color_separation_days,
+    }
+    text = format_exact_copy_breakdown(
+        exact_copy_rule_breakdown(events, curves, combo, day=day)
+    )
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
 def score_with_frozen_cuts(
     events: pd.DataFrame,
     curves: pd.DataFrame,
