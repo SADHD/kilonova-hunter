@@ -51,10 +51,11 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install compilers for the sim extra
-        # sncosmo may build from source. python3.12-dev matches the
-        # interpreter uv installs.
-        run: sudo apt-get update && sudo apt-get install -y build-essential python3.12-dev
+      - name: Install a C compiler for the sim extra
+        # sncosmo 2.13.1 has no Linux wheel, so this job compiles it.
+        # uv's own Python 3.12 supplies the headers. Ubuntu 26 has no
+        # python3.12-dev package.
+        run: sudo apt-get update && sudo apt-get install -y build-essential
 
       - name: Install the project with the sim extra
         # This job is what runs the redback wrapper tests and the
