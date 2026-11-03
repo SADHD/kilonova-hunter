@@ -597,3 +597,78 @@ def test_build_recall_set_columns_match_what_the_report_reads() -> None:
         assert column in events.columns
     assert numbers.n_total == 2
     assert set(curves["object_id"]) <= set(events["object_id"])
+
+
+def test_cache_key_includes_depths_redback_and_the_dust_map() -> None:
+    """An old cache is not reused when the depths, redback, or dust map differ.
+
+    The string "False" in a judgeable column counts as no, not as yes.
+    """
+    from kilonova_hunter.sample import (
+        SampleSizeSettings,
+        _manifest,
+        _redback_version,
+        _result_from_frames,
+        _same_setup,
+    )
+    from kilonova_hunter.sky import DustSource
+
+    survey = SurveySettings()
+    dust = DustSource(mode="sfd")
+    manifest = _manifest(
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=survey,
+        settings=SampleSizeSettings(),
+        completed=0,
+        events=pd.DataFrame(),
+        status="ready",
+    )
+    assert manifest["redback_version"] == _redback_version()
+    assert manifest["dust_map"].startswith("SFD x 0.86")
+    assert manifest["survey"]["error_floor_mag"] == survey.error_floor_mag
+    assert "g" in manifest["survey"]["limits"]
+    assert _same_setup(
+        manifest,
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=survey,
+    )
+    stale = dict(manifest)
+    del stale["redback_version"]
+    assert not _same_setup(
+        stale,
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=survey,
+    )
+    louder_floor = replace(survey, error_floor_mag=survey.error_floor_mag + 0.05)
+    assert not _same_setup(
+        manifest,
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=louder_floor,
+    )
+    events = pd.DataFrame(
+        {
+            "judgeable_day3": ["False", "True", "1"],
+            "judgeable_day5": ["False", "False", "False"],
+            "judgeable_day7": ["0", "0", "0"],
+            "model_failed": ["False", "False", "False"],
+        }
+    )
+    loaded = _result_from_frames(
+        population="2017-like",
+        split="tuning",
+        status="ready",
+        events=events,
+        curves=pd.DataFrame(),
+        dust=dust,
+        cache_dir=Path("."),
+    )
+    assert loaded.n_judgeable_day3 == 2
+    assert loaded.n_model_failed == 0

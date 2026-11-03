@@ -50,6 +50,7 @@ from kilonova_hunter.sky import (
     DustSource,
     draw_footprint_positions,
     draw_merger_mjd,
+    dust_map_label,
     open_dust_source,
     redshift_at_luminosity_distance,
     sample_luminosity_distances,
@@ -521,13 +522,38 @@ def _write_cache(
 
 
 def _survey_dict(survey: SurveySettings) -> dict:
+    """The survey numbers a cache must match before it is reused.
+
+    Depths and the error floor are part of the key. A cache built with
+    different limits is a different survey, even when the cadence matches.
+    """
+    assert survey.limits is not None
     return {
         "cadence": survey.cadence,
         "wfd_gap_min_days": survey.wfd_gap_min_days,
         "wfd_gap_max_days": survey.wfd_gap_max_days,
         "survey_length_days": survey.survey_length_days,
         "bands": list(survey.bands),
+        "limits": {band: float(survey.limits[band]) for band in survey.bands},
+        "error_floor_mag": float(survey.error_floor_mag),
     }
+
+
+def _redback_version() -> str:
+    """Installed redback version, or ``not-installed`` when it is absent."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("redback")
+    except PackageNotFoundError:
+        return "not-installed"
+
+
+def _recorded_dust_map(dust: DustSource) -> str:
+    """What the manifest should say about the dust map for this run."""
+    if dust.mode == "sfd":
+        return dust_map_label()
+    return "dry-run"
 
 
 def _same_setup(
@@ -544,6 +570,8 @@ def _same_setup(
         and manifest.get("split") == split
         and manifest.get("parent_seed") == PARENT_SEED
         and manifest.get("dust_mode") == dust.mode
+        and manifest.get("dust_map") == _recorded_dust_map(dust)
+        and manifest.get("redback_version") == _redback_version()
         and manifest.get("survey") == _survey_dict(survey)
     )
 
@@ -559,10 +587,7 @@ def _result_from_frames(
     cache_dir: Path,
 ) -> SampleResult:
     def _count(day: int) -> int:
-        column = f"judgeable_day{day}"
-        if events.empty or column not in events.columns:
-            return 0
-        return int(events[column].astype(bool).sum())
+        return _judge_count(events, day)
 
     failed = _flag_sum(events, "model_failed")
     return SampleResult(
@@ -755,6 +780,9 @@ def simulate_exact_copies(
         loaded is not None
         and loaded[0].get("cache_version") == CACHE_VERSION
         and loaded[0].get("dust_mode") == dust_source.mode
+        and loaded[0].get("dust_map") == _recorded_dust_map(dust_source)
+        and loaded[0].get("redback_version") == _redback_version()
+        and loaded[0].get("survey") == _survey_dict(sky)
         and int(loaded[0].get("n_simulated", 0)) == count
     ):
         _manifest_loaded, events, curves = loaded
@@ -789,7 +817,10 @@ def simulate_exact_copies(
         "population": EXACT_KIND,
         "split": "copies",
         "dust_mode": dust_source.mode,
+        "dust_map": _recorded_dust_map(dust_source),
         "dust_reason": dust_source.reason,
+        "redback_version": _redback_version(),
+        "survey": _survey_dict(sky),
         "n_simulated": len(events),
         "seed": EXACT_SEED,
         "status": "ready",
@@ -807,19 +838,24 @@ def simulate_exact_copies(
 
 
 def _flag_sum(events: pd.DataFrame, column: str) -> int:
-    """Sum a 0/1 column after a CSV round trip."""
+    """Sum a yes/no column, including after a CSV round trip.
+
+    The string "False" is not true. ``astype(bool)`` would count
+    that word as true because any non-empty string is true in Python.
+    """
     if events.empty or column not in events.columns:
         return 0
-    return int(pd.to_numeric(events[column]).fillna(0).sum())
+    raw = events[column]
+    numeric = pd.to_numeric(raw, errors="coerce")
+    words = raw.astype(str).str.strip().str.lower()
+    filled = numeric.where(~numeric.isna(), words.map({"true": 1.0, "false": 0.0}))
+    return int(filled.fillna(0).sum())
 
 
 def _judge_count(events: pd.DataFrame, day: int) -> int:
     if events.empty:
         return 0
-    column = f"judgeable_day{day}"
-    # to_numeric accepts 0/1 and True/False. A CSV round trip stays honest:
-    # the string "False" would have counted as true under astype(bool).
-    return int(pd.to_numeric(events[column]).fillna(0).sum())
+    return _flag_sum(events, f"judgeable_day{day}")
 
 
 def _manifest(
@@ -839,7 +875,9 @@ def _manifest(
         "split": split,
         "parent_seed": PARENT_SEED,
         "dust_mode": dust.mode,
+        "dust_map": _recorded_dust_map(dust),
         "dust_reason": dust.reason,
+        "redback_version": _redback_version(),
         "survey": _survey_dict(survey),
         "sample_size": asdict(settings),
         "completed_batches": completed,
