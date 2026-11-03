@@ -686,3 +686,60 @@ def test_two_concurrent_score_runs_let_one_through(tmp_path: Path) -> None:
     assert (cache / "test_scored_once.json").is_file()
     reports = [first / "test_score.md", second / "test_score.md"]
     assert sum(path.is_file() for path in reports) == 1
+
+
+def _grid_argv(tmp_path: Path) -> list[str]:
+    return [
+        "recall",
+        "--grid",
+        "--output",
+        str(tmp_path / "out"),
+        "--cache",
+        str(tmp_path / "cache"),
+    ]
+
+
+def _patch_grid(monkeypatch: pytest.MonkeyPatch, status: str | None) -> None:
+    from kilonova_hunter.grid import GridRun
+
+    monkeypatch.setattr("kilonova_hunter.cli.redback_available", lambda: True)
+
+    def fake_grid(**kwargs):
+        return GridRun(
+            text="tuning grid\n",
+            sign_off_blocker=status is not None,
+            copy_status=status,
+        )
+
+    monkeypatch.setattr("kilonova_hunter.grid.run_tuning_grid", fake_grid)
+
+
+def test_grid_exits_2_when_the_copy_verdict_is_untestable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UNTESTABLE is a sign-off blocker. The grid command must not exit 0."""
+    _patch_grid(monkeypatch, "untestable")
+    with pytest.raises(SystemExit) as caught:
+        main(_grid_argv(tmp_path))
+    assert caught.value.code == 2
+    assert "UNTESTABLE" in capsys.readouterr().err
+
+
+def test_grid_exits_2_when_the_copy_verdict_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FAIL is a sign-off blocker. The grid command must not exit 0."""
+    _patch_grid(monkeypatch, "fail")
+    with pytest.raises(SystemExit) as caught:
+        main(_grid_argv(tmp_path))
+    assert caught.value.code == 2
+    assert "FAIL" in capsys.readouterr().err
+
+
+def test_grid_exits_0_when_the_copy_verdict_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A passing copy verdict does not change the exit code."""
+    _patch_grid(monkeypatch, None)
+    main(_grid_argv(tmp_path))
+    assert "Sign-off blocker" not in capsys.readouterr().err

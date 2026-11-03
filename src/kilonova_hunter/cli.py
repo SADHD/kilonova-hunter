@@ -510,14 +510,20 @@ def _run_grid(args) -> None:
             "kilohunt recall --grid needs the redback library. Install it with:\n"
             "    uv sync --extra sim"
         )
-    print(
-        run_tuning_grid(
-            output_dir=args.output,
-            cache_dir=args.cache,
-            sample_size=size,
-            workers=max(1, args.workers),
-        )
+    result = run_tuning_grid(
+        output_dir=args.output,
+        cache_dir=args.cache,
+        sample_size=size,
+        workers=max(1, args.workers),
     )
+    print(result.text)
+    if result.sign_off_blocker:
+        label = (result.copy_status or "blocker").upper()
+        print(
+            f"Sign-off blocker: the exact-copy verdict is {label}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
 
 def _run_recall(set_size: int, seed: int | None, which: str, cadence: str) -> None:
