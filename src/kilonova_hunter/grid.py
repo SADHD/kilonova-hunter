@@ -293,9 +293,9 @@ def caught_not_judgeable_blocks(rows: list[dict]) -> bool:
     Rule 5 requires that count to be 0. A nonzero count blocks sign-off
     the same way a sanity FAIL does.
 
-    Pending Science Lead: this currently looks at every scored cell,
-    all 72 cuts and the distance bins, not only a chosen cut. No cut
-    is chosen here. Leave that scope until the ruling.
+    Ruling 12(21) keeps this check on every scored cell: all 72 cuts and
+    the distance bins. A breach in a cell that is not the chosen cut
+    still blocks, and ``kilohunt recall --grid`` exits 2.
     """
     return any(int(row.get("n_caught_not_judgeable", 0)) > 0 for row in rows)
 
@@ -1575,7 +1575,8 @@ def run_tuning_grid(
         )
     if caught_not_judgeable_blocks(rows):
         reasons.append(
-            "caught-but-not-judgeable is not zero, which breaks rule 5 "
+            "caught-but-not-judgeable is not zero in a scored cell, "
+            "including one that is not the chosen cut, which breaks rule 5 "
             "and blocks sign-off"
         )
         blocked = True
