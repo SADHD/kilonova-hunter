@@ -1,72 +1,164 @@
-# Early g gap after the diffusion fix
+# Brightness bar, Decision Log 12(15)(b). Not changed by 12(17).
 
-The figure `docs/at2017gfo_brightness_check.png` was regenerated with
-the diffusion wrapper. The model is the Villar Table 2 center at 40 Mpc
-with no dust. The points are Open Kilonova Catalog g, r, and i, with
-Fitzpatrick 1999 extinction removed at E(B-V) = 0.105 and R_V = 3.1.
-A positive number means the model is fainter than the corrected point.
-Each cell is the median over the points in that window, in magnitudes.
+From day 0.8 on, g, r, and i must each be within 0.3 mag of dereddened
+AT2017gfo in every window. Before day 0.8 the difference is a model
+limit and is not scored against the bar. The bar is not loosened.
+The cuts and the model are not changed to close the gap.
 
-| window (days) | g | r | i | n (g, r, i) |
+**The bar is NOT met.**
+
+A positive residual means the model is fainter than the dereddened
+point. The per-epoch residuals are in `docs/at2017gfo_bandpass_residuals.csv`.
+
+## Known model limit, 12(15)(a)
+
+The light curve is radioactive heating only. It has no cocoon shock
+cooling (Piro & Kollmeier 2018). The color rule is measured at the
+r-band peak plus 1 day, which is past day 0.8, so the early gap does
+not affect that rule in either direction. Its only effect is that the
+fakes are too faint before day 0.8, which biases day-3 recall low.
+
+## Check 1, done first: each point's instrument bandpass, both in AB
+
+216 rows are AB. No row arrived as Vega. One row is dropped and flagged:
+day 0.451, i = 17.3, blank magnitude system, blank telescope, blank
+instrument (source id 41 in the photometry file).
+
+Where sncosmo has the instrument's bandpass, the model is evaluated in
+that bandpass. Otherwise the nearest sncosmo bandpass is used and named.
+
+| instrument | sncosmo band | kind |
+| --- | --- | --- |
+| DECam | desg, desr, desi | exact |
+| Pan-STARRS PS1 | ps1::g, ps1::r, ps1::i | exact |
+| T80S, LCO Sinistro, Swope, LDSS, IMACS, GROND, SkyMapper, REM ROS2, OmegaCam, AST3-2, VLT FORS/VIMOS/X-shooter/Danish 1.5 m, Gemini, Prompt, Tripol5, Zadko, and the other rows | sdssg, sdssr, sdssi | nearest. sncosmo has no bandpass for that instrument |
+
+Dust is Fitzpatrick 1999, R_V = 3.1, E(B-V) = 0.105, at that bandpass's
+effective wavelength. The LSST comparison uses lsstg, lsstr, and lssti
+and the LSST effective wavelengths, which is the figure
+`docs/at2017gfo_brightness_check.png`.
+
+### LSST bandpasses (the figure)
+
+| window (days) | g | r | i | scored? |
 | --- | --- | --- | --- | --- |
-| 0.4–0.8 | +0.65 | +0.41 | +0.34 | 4, 5, 7 |
-| 0.8–1.5 | +0.20 | −0.06 | −0.29 | 25, 29, 24 |
-| 1.5–3.0 | +0.46 | +0.17 | +0.10 | 11, 23, 21 |
-| 3.0–6.0 | +0.26 | +0.00 | +0.10 | 11, 25, 13 |
+| 0.4–0.8 | +0.65 (n=4) | +0.41 (n=5) | +0.33 (n=6) | model limit, not scored |
+| 0.8–1.5 | +0.20 PASS | −0.06 PASS | −0.29 PASS | scored |
+| 1.5–3.0 | +0.46 FAIL | +0.17 PASS | +0.10 PASS | scored |
+| 3.0–6.0 | +0.26 PASS | +0.00 PASS | +0.10 PASS | scored |
+| 6.0 and later | +0.304 FAIL | +0.347 FAIL | −0.024 PASS | scored |
 
-Early g is still 0.65 mag faint. The ~0.3 mag target is not met there.
-Later r is within about 0.2 mag, and r after day 3 is about 0.
+g fails at 1.5–3.0 days (+0.46) and again after day 6 (+0.30). r fails
+after day 6 (+0.35).
 
-Nothing below changes the model. Each line is how much of that 0.65 mag
-the check can account for.
+### Instrument bandpasses
 
-## (i) Heating rate and thermalization
+| window (days) | g | r | i | scored? |
+| --- | --- | --- | --- | --- |
+| 0.4–0.8 | +0.68 (n=4) | +0.41 (n=5) | +0.33 (n=6) | model limit, not scored |
+| 0.8–1.5 | +0.304 FAIL | −0.046 PASS | −0.286 PASS | scored |
+| 1.5–3.0 | +0.580 FAIL | +0.191 PASS | +0.098 PASS | scored |
+| 3.0–6.0 | +0.333 FAIL | +0.027 PASS | +0.082 PASS | scored |
+| 6.0 and later | +0.303 FAIL | +0.346 FAIL | +0.000 PASS | scored |
 
-redback 1.20.0 `_one_component_kilonova_model` uses
+The instrument bandpasses do not bring g within 0.3 mag after day 0.8.
+g is outside the bar in every scored window. This check did not close
+the gap, so the bolometric comparison below was run.
 
-- heating `4.0e18 * M * (0.5 - arctan((t - 1.3) / 0.11) / pi)^1.3`,
-  with t, 1.3, and 0.11 in seconds
-- thermalization `0.36 * (exp(-a t_days) + log1p(2 b t^d) / (2 b t^d))`,
-  with a, b, d from the Barnes and Kasen 2016 grid
+## Check 2, code reading: three blackbodies, not one photosphere
 
-MOSFiT `rprocess.py` uses the same heating formula, the same 0.36, and
-the same Barnes and Kasen grid. The efficiency changes with time. The
-difference explains about 0 mag of the 0.65.
+redback 1.20.0 `three_component_kilonova_model` loops over the three
+components (`kilonova_models.py` around lines 1186–1200). Each component
+calls `_one_component_kilonova_model`, which returns that component's
+own temperature and photospheric radius. Each of those is turned into
+its own blackbody spectrum with `blackbody_to_spectrum`. The spectra are
+added (`full_spec += spectra`). There is no single combined photosphere.
+
+## Check 3, code reading: exact copies use all three Villar components
+
+`villar.exact_components` returns blue, purple, and red at the Table 2
+centers. `villar_magnitudes` calls `three_component_kilonova_model` with
+those three components in that order and passes the floors 674 K,
+1308 K, and 3745 K as positional arguments (`villar.py`,
+`exact_components` and the call in `villar_magnitudes`). The same path
+is what the exact-copy simulation uses.
+
+## Check 4: bolometric luminosity, because check 1 did not close the gap
+
+The published curve is Waxman, Ofek, Kushnir, and Gal-Yam 2018,
+MNRAS 481, 3423, Table B2, column L_int (the trapezoidal bolometric
+luminosity they adopt). The numbers are in
+`docs/at2017gfo_bolometric_waxman2018.csv`. MOSFiT was not run.
+
+The model luminosity is the sum of the three component bolometric
+luminosities from `_one_component_kilonova_model`, with the diffusion
+wrapper on, at the Table 2 center. A ratio below 1 means the model is
+fainter. The magnitude column is how many magnitudes fainter the model
+is (`-2.5 log10(ratio)`).
+
+| day | model / Waxman L_int | model fainter by (mag) |
+| --- | --- | --- |
+| 0.5 | 0.082 | +2.72 |
+| 0.6 | 0.072 | +2.86 |
+| 0.8 | 0.207 | +1.71 |
+| 1.0 | 0.337 | +1.18 |
+| 1.2 | 0.474 | +0.81 |
+| 1.5 | 0.657 | +0.46 |
+| 2.5 | 0.839 | +0.19 |
+| 3.5 | 0.948 | +0.06 |
+| 4.5 | 1.116 | −0.12 |
+| 5.5 | 1.269 | −0.26 |
+| 6.5 | 1.461 | −0.41 |
+| 7.5 | 1.693 | −0.57 |
+
+The total is low before about day 2. That points to heating, ejecta
+mass, or the missing early shock-cooling term, not to a temperature
+shift alone. At 1.5 days the bolometric deficit is 0.46 mag, the same
+size as the g failure in the 1.5–3.0 day window. By day 3.5 the
+bolometric ratio is about 1. Later the model is brighter than the
+Waxman integral. The g bar is still not met.
+
+## (i) Heating, by reading the code, not by running both models
+
+redback 1.20.0 `_one_component_kilonova_model` was read in this
+environment. MOSFiT `mosfit/modules/engines/rprocess.py` was read from
+the guillochon/MOSFiT master source (lines 70–76). MOSFiT was not
+executed.
+
+Both use `4.0e18 * mass * (0.5 - arctan((t_seconds - 1.3) / 0.11) / pi)^1.3`
+and Barnes & Kasen thermalization with the factor 0.36:
+`exp(-a t) + log1p(2 b t^d) / (2 b t^d)`. redback multiplies those as
+`lum_in * e_th`. MOSFiT multiplies them in one expression
+(`self._lscale = mass * 4.0e18 * 0.36`, then the arctan and the
+thermalization factor). The efficiency changes with time. The formulas
+match. This comparison explains about 0 mag of the g gap. It is a
+code comparison, not a side-by-side numerical MOSFiT run.
 
 ## (ii) Time zero
 
 The photometry clock and the model both use the GW trigger,
-MJD 57982.528524. The catalog also lists the merger at MJD 57982.5,
-which is 0.0285 days earlier. GRB 170817A is 1.7 seconds after the
-merger. Over 0.4–0.8 days the fixed model g changes by about −0.51
-mag per day (still getting brighter). A 0.0285-day shift is about
-0.015 mag. That is about 0.01 mag of the 0.65, not the gap itself.
-This note does not quote a separate MOSFiT fitted explosion time; the
-Villar text that was available ties the light curve to the merger.
+MJD 57982.528524. The catalog merger time 57982.5 is 0.0285 days
+earlier. Model g is still brightening there, about −0.51 mag/day, so
+that shift is about 0.015 mag.
 
 ## (iii) Dust and distance
 
-The catalog magnitudes are not corrected for Milky Way dust. The figure
-removes Fitzpatrick extinction before the comparison: A_g = 0.38 mag,
-A_r = 0.27 mag, A_i = 0.20 mag at E(B-V) = 0.105. The 0.65 mag gap is
-what remains after that correction, so a missed dust correction is not
-sitting inside it.
+The catalog magnitudes are not corrected for Milky Way dust. The
+residuals above remove Fitzpatrick extinction first. The gap that fails
+the bar is what remains after that correction. The model is at 40 Mpc.
+The catalog luminosity distance of 43.2 Mpc would make the model
+0.17 mag fainter (`5 log10(43.2/40)`), which would widen the gap.
+NGC 4993 at 39.5 Mpc is 0.03 mag from 40.
 
-The model is at 40 Mpc. The catalog luminosity distance is 43.2 Mpc,
-which would make the model 0.17 mag fainter (`5 log10(43.2/40)`).
-Putting the model at 40 instead of 43 makes the faint gap smaller, not
-larger. NGC 4993 at 39.5 Mpc is 0.03 mag from 40. Distance contributes
-about 0 mag to the model being too faint, and the 43.2 Mpc choice would
-add about 0.17 mag to the gap rather than remove it.
+## (iv) Blue temperature before day 1
 
-## (iv) Blue-component temperature before day 1
+With the wrapper, the blue component (0.020 solar masses, 0.266c,
+opacity 0.5, floor 674 K) is about 7000 K at 0.3 days, 6200 K at
+0.5 days, and 5700 K at 0.8 days. The floor is not binding.
 
-With the diffusion wrapper, the blue component (0.020 solar masses,
-0.266c, opacity 0.5, floor 674 K) has a temperature of about 7000 K at
-0.3 days, 6200 K at 0.5 days, and 5700 K at 0.8 days. The 674 K floor
-is not binding. It explains about 0 mag of the 0.65.
+## What Science Lead has to rule
 
-## What is left
-
-(i) through (iv) add up to about 0.01 mag. The 0.65 mag early-g gap is
-still there after the diffusion fix and after these four checks.
+The bar is not met. g is 0.46 mag faint at 1.5–3.0 days on the LSST
+bandpasses, and the instrument bandpasses make that window 0.58 mag.
+The early bolometric luminosity is low as well. Nothing here changes
+the bar, the cuts, or the model.

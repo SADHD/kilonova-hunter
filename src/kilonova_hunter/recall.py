@@ -93,6 +93,16 @@ from kilonova_hunter.tns import TNS_STATUS_LINE
 
 logger = logging.getLogger(__name__)
 
+# Printed on the recall, grid, and test-set reports. Decision Log 12(15).
+# The bar is not loosened and the model is not tuned to close the gap.
+EARLY_GAP_MODEL_LIMIT = (
+    "Known model limit: radioactive heating only, no cocoon shock cooling "
+    "(Piro & Kollmeier 2018). The color rule is measured at the r-band peak "
+    "plus 1 day, which is past day 0.8, so the early gap does not affect "
+    "that rule in either direction. Its only effect is that the fakes are "
+    "too faint before day 0.8, which biases day-3 recall low."
+)
+
 # The official recall number uses the test set. The tuning set is written
 # so the science lead can try cuts without looking at the test set.
 TUNING_SET = "tuning"
@@ -198,14 +208,19 @@ class PopulationSettings:
             masses. Fixed. About the heaviest known pulsars.
         zeta: Fraction of the disk that becomes unbound. Fixed.
         vej_wind: Disk-wind speed, as a fraction of the speed of light.
-        kappa_dynamical: Opacity of the dynamical (redder) ejecta.
-        kappa_wind: Opacity of the disk wind (bluer ejecta).
+        kappa_dynamical: Opacity of the dynamical ejecta, in cm^2/g.
+            10 is this project's assumption. redback's prior draws
+            opacities uniformly from 1 to 30.
+        kappa_wind: Opacity of the disk wind, in cm^2/g. 0.5 is this
+            project's assumption, not a redback default.
         tf_dynamical: Temperature floor of the dynamical ejecta, in kelvin.
-            2500 K is redback's default for this component. It is kept.
+            2500 K is this project's assumption. redback 1.20.0 does not
+            supply a default. ``tf_1`` and ``tf_2`` are required, and the
+            shipped prior is log-uniform from 100 K to 6000 K.
         tf_wind: Temperature floor of the disk wind, in kelvin. 5000 K
-            is redback's default for this component. It is kept. A
-            separate NOT-COUNTED run uses 3745 K and 1308 K instead.
-            That run is not this population.
+            is this project's assumption, same as ``tf_dynamical``.
+            A NOT-COUNTED sensitivity uses 3745 K on the dynamical
+            ejecta and 674 K on the wind. That run is not this population.
     """
 
     count: int = 200
@@ -223,7 +238,9 @@ class PopulationSettings:
     vej_wind: float = 0.10
     kappa_dynamical: float = 10.0
     kappa_wind: float = 0.5
-    # redback defaults. Kept on purpose. Not the Villar table floors.
+    # Project assumptions, not redback defaults. redback 1.20.0 requires
+    # tf_1 and tf_2. Its prior is log-uniform from 100 K to 6000 K, and
+    # its opacities are uniform from 1 to 30. Kept on purpose.
     tf_dynamical: float = 2500.0
     tf_wind: float = 5000.0
 
@@ -643,26 +660,29 @@ def _wfd_pair_starts(
 ) -> np.ndarray:
     """Times when each visit pair starts, in days after the merger.
 
-    Gaps are drawn from the same 2 to 4 day range on both sides of the
-    merger. The merger is placed at a uniform random time inside one of
-    those gaps. Times before the merger are negative. The earliest pair
+    The survey is built first, as a continuous sequence of 2 to 4 day
+    gaps. The merger is then placed at a uniform random time on that
+    sequence. A uniform instant lands in a longer gap more often, which
+    is the length weighting a running survey actually has. Drawing the
+    gap first and then a uniform time inside it would miss that, and
+    the mean wait until the next visit would be 1.5 days instead of
+    14/9 days. Times before the merger are negative. The earliest pair
     is at least ``_WFD_PRE_MERGER_DAYS`` before the merger.
     """
     low = survey.wfd_gap_min_days
     high = survey.wfd_gap_max_days
-    gap = float(rng.uniform(low, high))
-    phase = float(rng.uniform(0.0, gap))
-    starts = [-phase]
-    clock = -phase
-    while clock > -_WFD_PRE_MERGER_DAYS:
-        clock -= float(rng.uniform(low, high))
-        starts.append(clock)
-    clock = gap - phase
-    while clock <= survey.survey_length_days:
-        starts.append(clock)
+    # Long enough that the merger is not stuck on the first few gaps,
+    # where a sequence that starts on a visit has not settled.
+    target = max(_WFD_PRE_MERGER_DAYS + survey.survey_length_days + high, 120.0)
+    starts = [0.0]
+    clock = 0.0
+    while clock < target:
         clock += float(rng.uniform(low, high))
-    starts.sort()
-    return np.asarray(starts, dtype=float)
+        starts.append(clock)
+    earliest = _WFD_PRE_MERGER_DAYS
+    latest = clock - survey.survey_length_days
+    merger = float(rng.uniform(earliest, latest))
+    return np.asarray(starts, dtype=float) - merger
 
 
 def _wfd_visits(
@@ -1573,6 +1593,7 @@ def format_recall_report(
         "Recall uses the placeholder cuts in config.py. They have not been tuned."
     )
     lines.append(TNS_STATUS_LINE)
+    lines.append(EARLY_GAP_MODEL_LIMIT)
     lines.append(
         "Judgeable (a) is the official section 1 rule. "
         "Judgeable (b) also needs a usable g minus r at r-peak + 1 day, "

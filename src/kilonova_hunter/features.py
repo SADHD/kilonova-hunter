@@ -607,8 +607,7 @@ def _gap_limit(max_gap_days: float | None) -> float:
         return THRESHOLDS.max_color_interpolation_gap_days
     if max_gap_days <= 0:
         raise ValueError(
-            "max_gap_days must be a positive number of days, "
-            f"got {max_gap_days}."
+            f"max_gap_days must be a positive number of days, got {max_gap_days}."
         )
     return max_gap_days
 

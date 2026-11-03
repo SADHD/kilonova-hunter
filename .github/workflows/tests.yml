@@ -38,3 +38,31 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+  test-sim:
+    name: Ruff and pytest with the sim extra
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install compilers for the sim extra
+        # sncosmo may build from source. python3.12-dev matches the
+        # interpreter uv installs.
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3.12-dev
+
+      - name: Install the project with the sim extra
+        # This job is what runs the redback wrapper tests and the
+        # Planck18 redshift test. The job above skips them.
+        run: uv sync --locked --extra sim
+
+      - name: Check for mistakes with Ruff
+        run: uv run ruff check
+
+      - name: Run tests
+        run: uv run pytest

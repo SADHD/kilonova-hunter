@@ -46,9 +46,7 @@ def test_drawn_luminosity_distances_stay_between_10_and_300() -> None:
     pytest.importorskip("scipy")
     from kilonova_hunter.sky import sample_luminosity_distances
 
-    _redshifts, distances = sample_luminosity_distances(
-        np.random.default_rng(11), 4000
-    )
+    _redshifts, distances = sample_luminosity_distances(np.random.default_rng(11), 4000)
     assert distances.min() >= 10.0
     assert distances.max() <= 300.0
 

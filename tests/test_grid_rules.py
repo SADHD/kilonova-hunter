@@ -399,8 +399,13 @@ def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     }
     result = score_exact_copies(events, curves, combo)
     assert result["n_judgeable"] == 0
-    assert result["blocker"] is True
-    assert "SIGN-OFF BLOCKER" in "\n".join(_copy_lines(result))
+    assert result["official"]["status"] == "untestable"
+    assert result["blocker"] is False
+    text = "\n".join(_copy_lines(result))
+    assert "UNTESTABLE" in text
+    assert "v1 not Done" in text
+    assert "nan" not in text.lower()
+    assert "SIGN-OFF BLOCKER" not in text
 
 
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
