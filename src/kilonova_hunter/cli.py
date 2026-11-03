@@ -312,14 +312,41 @@ def _run_demo(output: Path, seed: int, save_csv: Path | None) -> None:
     print(_format_verdict(is_kilonova_candidate(noise_free)))
 
 
-def _cuts_are_frozen(path: Path | None) -> bool:
-    """True when ``path`` is a JSON file with ``"frozen": true``."""
+# The same four numbers --score-test reads. A frozen file has to name them.
+_FROZEN_CUT_KEYS = (
+    "redder_than_g_minus_r",
+    "min_g_minus_r_rise",
+    "reddening_window_days",
+    "min_color_separation_days",
+)
+
+
+def _cuts_are_frozen(path: Path | None) -> tuple[bool, str]:
+    """Whether the cuts file is frozen, and why it is not.
+
+    A frozen file is a JSON object with ``"frozen": true`` and the four
+    cut keys ``--score-test`` requires. A missing file, a list, missing
+    keys, or invalid JSON is not frozen. This returns that reason. It
+    does not raise.
+    """
     import json
 
-    if path is None or not path.is_file():
-        return False
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return payload.get("frozen") is True
+    if path is None:
+        return False, "No cuts file was given."
+    if not path.is_file():
+        return False, f"Cuts file does not exist: {path}"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False, "Cuts file is not valid JSON."
+    if not isinstance(payload, dict):
+        return False, "Cuts file must be a JSON object, not a list or other value."
+    if payload.get("frozen") is not True:
+        return False, 'Cuts file must contain "frozen": true.'
+    missing = [name for name in _FROZEN_CUT_KEYS if name not in payload]
+    if missing:
+        return False, f"Cuts file is missing {', '.join(missing)}."
+    return True, ""
 
 
 def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) -> None:
@@ -337,11 +364,11 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
         write_slice_document,
     )
 
-    if not _cuts_are_frozen(cuts):
+    frozen, reason = _cuts_are_frozen(cuts)
+    if not frozen:
         _fail(
-            "--fetch-alerts does not write until a cuts file with "
-            '"frozen": true exists. Test-slice flag counts are not '
-            "written before the cuts are frozen. Nothing was written."
+            f"{reason} --fetch-alerts does not write test-slice flag counts "
+            "until the cuts are frozen. Nothing was written."
         )
     try:
         start_day = date.fromisoformat(start)
@@ -401,21 +428,14 @@ def _run_score_test(args) -> None:
         )
     if args.cuts is None:
         _fail("--score-test needs --cuts pointing at a JSON file of frozen cuts.")
-    if not args.cuts.is_file():
-        _fail(f"--cuts file does not exist: {args.cuts}")
+    frozen, reason = _cuts_are_frozen(args.cuts)
+    if not frozen:
+        _fail(reason)
     cuts = json.loads(args.cuts.read_text(encoding="utf-8"))
-    if cuts.get("frozen") is not True:
-        _fail('The cuts file must contain "frozen": true.')
-    needed = (
-        "redder_than_g_minus_r",
-        "min_g_minus_r_rise",
-        "reddening_window_days",
-        "min_color_separation_days",
-    )
-    missing = [name for name in needed if name not in cuts]
-    if missing:
-        _fail(f"--cuts is missing {', '.join(missing)}.")
-    combo = {name: float(cuts[name]) for name in needed}
+    raw_decision = cuts.get("decision_id")
+    decision_id = raw_decision.strip() if isinstance(raw_decision, str) else ""
+    decision_id = decision_id or None
+    combo = {name: float(cuts[name]) for name in _FROZEN_CUT_KEYS}
     cache = Path(args.cache)
     expected_map = dust_map_label()
     loaded_sets = []
@@ -450,7 +470,7 @@ def _run_score_test(args) -> None:
     # before the cache-validity checks, so the message is the rescore
     # refusal rather than a provenance mismatch.
     identity = test_set_sha256(loaded_sets)
-    if _test_set_already_claimed(identity):
+    if _test_set_already_claimed(identity) and decision_id is None:
         _refuse_rescore(identity, fresh_cache=True)
     for population, manifest, _events, _curves in loaded_sets:
         reason = cache_refusal_reason(manifest)
@@ -468,7 +488,7 @@ def _run_score_test(args) -> None:
     # Claim the once-only marker before any scoring. The key is the test
     # set itself, stored outside the cache, so a fresh --cache cannot
     # reset it. The create is exclusive. A crash still leaves the claim.
-    _claim_score_once_marker(loaded_sets, combo)
+    _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
     by_population = {}
     for population, manifest, events, curves in loaded_sets:
         by_population[population] = score_with_frozen_cuts(
@@ -510,7 +530,11 @@ _RESCORE_NEEDS_A_DECISION = (
 
 def _repo_root() -> Path:
     """Directory that contains ``src`` and ``results``. Not the working directory."""
-    return Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[2]
+    assert (root / "pyproject.toml").is_file(), (
+        f"pyproject.toml was not found in {root}."
+    )
+    return root
 
 
 def test_set_scored_path() -> Path:
@@ -623,7 +647,9 @@ def _record_scored_test_set(
     *,
     git_sha: str,
     scored_at: str,
+    decision_id: str | None = None,
 ) -> None:
+    """Append one scoring entry. A later entry does not replace the first."""
     import hashlib
     import json
 
@@ -634,63 +660,84 @@ def _record_scored_test_set(
     else:
         payload = {"sets": {}}
     cuts = json.dumps(combo, sort_keys=True, separators=(",", ":"))
-    payload.setdefault("sets", {})[test_hash] = {
+    entry = {
         "cuts_sha256": hashlib.sha256(cuts.encode("utf-8")).hexdigest(),
         "cuts": combo,
         "provenance": _provenance(loaded_sets),
         "git_sha": git_sha,
         "scored_at": scored_at,
     }
+    if decision_id:
+        entry["decision_id"] = decision_id
+    current = payload.setdefault("sets", {}).get(test_hash)
+    if current is None:
+        entries: list = []
+    elif isinstance(current, dict):
+        entries = [current]
+    else:
+        entries = list(current)
+    entries.append(entry)
+    payload["sets"][test_hash] = entries
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _claim_score_once_marker(loaded_sets: list, combo: dict[str, float]) -> None:
+def _claim_score_once_marker(
+    loaded_sets: list,
+    combo: dict[str, float],
+    *,
+    decision_id: str | None = None,
+) -> None:
     """Create an exclusive claim for this test set before scoring.
 
     The ledger lives at ``results/test_set_scored.json``, not in the
     cache. Copying the cache, or pointing ``--cache`` at a fresh folder
     with the same fakes, does not clear it. A different seed set gets
     its own claim. Changing the cache version, redback version, diffusion
-    fix, or dust map does not.
+    fix, or dust map does not. A rescore of the same set is appended
+    only when ``decision_id`` names the approving decision. The first
+    entry stays.
     """
     import json
     import os
 
     test_hash = test_set_sha256(loaded_sets)
-    if test_hash in _ledger_hashes():
+    already = _test_set_already_claimed(test_hash)
+    if already and not decision_id:
         _refuse_rescore(test_hash, fresh_cache=True)
     git_sha = _git_sha()
     scored_at = _scored_at()
-    claim = test_set_claim_dir() / test_hash
-    claim.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    try:
-        descriptor = os.open(claim, flags, 0o644)
-    except FileExistsError:
-        _refuse_rescore(test_hash, fresh_cache=False)
-    body = (
-        json.dumps(
-            {
-                "test_set_sha256": test_hash,
-                "cuts": combo,
-                "provenance": _provenance(loaded_sets),
-                "git_sha": git_sha,
-                "scored_at": scored_at,
-            },
-            indent=2,
+    if not already:
+        claim = test_set_claim_dir() / test_hash
+        claim.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            descriptor = os.open(claim, flags, 0o644)
+        except FileExistsError:
+            _refuse_rescore(test_hash, fresh_cache=False)
+        body = (
+            json.dumps(
+                {
+                    "test_set_sha256": test_hash,
+                    "cuts": combo,
+                    "provenance": _provenance(loaded_sets),
+                    "git_sha": git_sha,
+                    "scored_at": scored_at,
+                },
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    try:
-        os.write(descriptor, body.encode("utf-8"))
-    finally:
-        os.close(descriptor)
+        try:
+            os.write(descriptor, body.encode("utf-8"))
+        finally:
+            os.close(descriptor)
     _record_scored_test_set(
         test_hash,
         combo,
         loaded_sets,
         git_sha=git_sha,
         scored_at=scored_at,
+        decision_id=decision_id,
     )
 
 

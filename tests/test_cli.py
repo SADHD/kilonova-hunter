@@ -810,7 +810,7 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
         ]
     )
     ledger = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
-    entry = next(iter(ledger["sets"].values()))
+    entry = next(iter(ledger["sets"].values()))[0]
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     assert entry["git_sha"] == head
     assert entry["scored_at"].endswith("Z")
@@ -881,6 +881,63 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
     assert len(again["sets"]) == 2
 
 
+def test_an_approved_rescore_keeps_the_first_score(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A decision id appends a second entry. The first score stays."""
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    ledger = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
+    test_hash, entries = next(iter(ledger["sets"].items()))
+    first = dict(entries[0])
+    assert "decision_id" not in first
+    approved = _frozen_cuts(tmp_path / "approved.json", frozen=True)
+    payload = json.loads(approved.read_text(encoding="utf-8"))
+    payload["decision_id"] = "PM-12-21"
+    payload["redder_than_g_minus_r"] = 0.2
+    approved.write_text(json.dumps(payload), encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(approved),
+            "--output",
+            str(second),
+            "--cache",
+            str(cache),
+        ]
+    )
+    again = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
+    kept = again["sets"][test_hash]
+    assert kept[0] == first
+    assert kept[1]["decision_id"] == "PM-12-21"
+    assert kept[1]["cuts"]["redder_than_g_minus_r"] == 0.2
+    assert (output / "test_score.md").is_file()
+    assert (second / "test_score.md").is_file()
+    capsys.readouterr()
+
+
 def _grid_argv(tmp_path: Path) -> list[str]:
     return [
         "recall",
@@ -929,44 +986,120 @@ def test_grid_exits_2_when_the_copy_verdict_fails(
     assert "FAIL" in capsys.readouterr().err
 
 
-def test_grid_exits_2_when_caught_but_not_judgeable_is_nonzero(
+def test_grid_exits_2_when_a_non_chosen_cell_breaks_rule_5(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A nonzero caught-but-not-judgeable count exits 2, like a sanity FAIL.
+    """A breach outside the placeholder cut exits 2 through ``_run_grid``.
 
-    Ruling 12(21): the breach is on a cell that is not the chosen cut.
-    The chosen cell itself is clean. The command still exits 2.
+    The population and the exact copies are a one-fake fixture. Scoring
+    the 72 cells and the sign-off check are the real functions. The
+    placeholder cut, g-r above 0 with a 2-day window, does not catch the
+    fake. A wider window does, and that fake is not judgeable.
     """
-    from kilonova_hunter.grid import GridRun, caught_not_judgeable_blocks
+    from types import SimpleNamespace
 
-    rows = [
-        {"chosen": True, "n_caught_not_judgeable": 0},
-        {"chosen": False, "n_caught_not_judgeable": 1},
-    ]
-    assert caught_not_judgeable_blocks(rows) is True
-    monkeypatch.setattr("kilonova_hunter.cli.redback_available", lambda: True)
+    from kilonova_hunter.cli import _run_grid
+    from kilonova_hunter.grid import PreparedFake, sanity_copy_verdict
+    from kilonova_hunter.sample import SampleResult
+    from kilonova_hunter.sky import DustSource
 
-    def fake_grid(**kwargs):
-        blocked = caught_not_judgeable_blocks(rows)
-        return GridRun(
-            text="tuning grid\n",
-            sign_off_blocker=blocked,
-            copy_status="caught-but-not-judgeable",
-            block_reasons=(
-                "caught-but-not-judgeable is not zero in a scored cell, "
-                "including one that is not the chosen cut, which breaks "
-                "rule 5 and blocks sign-off",
-            ),
+    rises = {
+        (window, gap): 0.0 if (window, gap) == (2.0, 0.5) else 0.4
+        for window in (2.0, 3.0, 5.0)
+        for gap in (0.5, 1.0)
+    }
+    fake = PreparedFake(
+        object_id="wide-window",
+        distance_mpc=40.0,
+        judgeable=False,
+        model_failed=False,
+        fade_passed=True,
+        color_value=0.5,
+        rises=rises,
+    )
+
+    def fake_prepare(events, curves, day, settings=None):
+        return [fake]
+
+    def fake_population(population, split, **kwargs):
+        return SampleResult(
+            population=population,
+            split=split,
+            status="ready",
+            n_simulated=1,
+            n_judgeable_day3=0,
+            n_judgeable_day5=0,
+            n_judgeable_day7=0,
+            n_model_failed=0,
+            dust_mode="dry-run",
+            dust_reason="fixture",
+            events=pd.DataFrame(columns=["object_id", "kind", "redshift"]),
+            light_curves=pd.DataFrame(),
+            cache_dir=tmp_path,
         )
 
-    monkeypatch.setattr("kilonova_hunter.grid.run_tuning_grid", fake_grid)
+    def passing_copies(events, curves, combo, day=3.0):
+        official = sanity_copy_verdict(50, 50)
+        return {
+            "n_copies": 50,
+            "n_judgeable": 50,
+            "n_judgeable_candidate": 50,
+            "n_caught_judgeable": 50,
+            "n_caught_candidate": 50,
+            "blocker": False,
+            "official": official,
+            "candidate": official,
+            "misses": [],
+        }
+
+    monkeypatch.setattr("kilonova_hunter.cli.redback_available", lambda: True)
+    monkeypatch.setattr(
+        "kilonova_hunter.sky.open_dust_source",
+        lambda: DustSource("dry-run", "fixture"),
+    )
+    monkeypatch.setattr("kilonova_hunter.sample.simulate_population", fake_population)
+    monkeypatch.setattr(
+        "kilonova_hunter.sample.simulate_exact_copies",
+        lambda **kwargs: fake_population("2017-like", "copies"),
+    )
+    monkeypatch.setattr("kilonova_hunter.grid.prepare_fakes", fake_prepare)
+    monkeypatch.setattr("kilonova_hunter.grid.score_exact_copies", passing_copies)
+    output = tmp_path / "out"
     with pytest.raises(SystemExit) as caught:
-        main(_grid_argv(tmp_path))
+        _run_grid(
+            SimpleNamespace(
+                output=output,
+                cache=tmp_path / "cache",
+                target=1,
+                cap=1,
+                floor=1,
+                batch_size=1,
+                workers=1,
+            )
+        )
     assert caught.value.code == 2
     err = capsys.readouterr().err
-    assert "blocks sign-off" in err
     assert "rule 5" in err
     assert "not the chosen cut" in err
+    saved = pd.read_csv(output / "tuning_grid.csv")
+    chosen = saved[
+        (saved["population"] == "2017-like")
+        & (saved["day"] == 3.0)
+        & (saved["distance_bin"] == "all")
+        & (saved["redder_than_g_minus_r"] == 0.0)
+        & (saved["min_g_minus_r_rise"] == 0.1)
+        & (saved["reddening_window_days"] == 2.0)
+        & (saved["min_color_separation_days"] == 0.5)
+    ]
+    other = saved[
+        (saved["population"] == "2017-like")
+        & (saved["day"] == 3.0)
+        & (saved["distance_bin"] == "all")
+        & (saved["reddening_window_days"] == 5.0)
+        & (saved["min_g_minus_r_rise"] == 0.1)
+    ]
+    assert int(chosen["n_caught_not_judgeable"].iloc[0]) == 0
+    assert int(other["n_caught_not_judgeable"].max()) > 0
 
 
 def test_grid_exits_0_when_the_copy_verdict_passes(
@@ -1051,8 +1184,7 @@ def test_fetch_alerts_refuses_until_cuts_are_frozen(
     assert not (still / "real_alert_slices.json").exists()
     assert not (still / "ztf_proxy_alerts.csv").exists()
 
-    cuts = tmp_path / "cuts.json"
-    cuts.write_text(json.dumps({"frozen": True}), encoding="utf-8")
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
     frozen_out = tmp_path / "frozen"
     frozen_out.mkdir()
     main(
@@ -1074,3 +1206,56 @@ def test_fetch_alerts_refuses_until_cuts_are_frozen(
     )
     assert "n_flagged" in frozen["flag_counts"]["test"]
     assert "refused" not in frozen["flag_counts"]["test"]
+
+
+def test_cuts_file_errors_are_not_frozen_and_do_not_raise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A list, missing keys, or bad JSON is not frozen, and does not traceback."""
+    from kilonova_hunter.cli import _cuts_are_frozen
+
+    missing = _frozen_cuts(tmp_path / "missing-keys.json", frozen=True)
+    payload = json.loads(missing.read_text(encoding="utf-8"))
+    del payload["min_g_minus_r_rise"]
+    missing.write_text(json.dumps(payload), encoding="utf-8")
+    listed = tmp_path / "list.json"
+    listed.write_text("[1, 2]\n", encoding="utf-8")
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+
+    ok, message = _cuts_are_frozen(missing)
+    assert ok is False
+    assert "missing" in message
+    ok, message = _cuts_are_frozen(listed)
+    assert ok is False
+    assert "JSON object" in message
+    ok, message = _cuts_are_frozen(broken)
+    assert ok is False
+    assert "not valid JSON" in message
+
+    for path, expected in (
+        (missing, "missing"),
+        (listed, "JSON object"),
+        (broken, "not valid JSON"),
+    ):
+        output = tmp_path / path.stem
+        output.mkdir()
+        with pytest.raises(SystemExit) as caught:
+            main(
+                [
+                    "recall",
+                    "--fetch-alerts",
+                    "--output",
+                    str(output),
+                    "--cuts",
+                    str(path),
+                    "--alert-start",
+                    "2024-06-01",
+                    "--alert-stop",
+                    "2024-06-02",
+                ]
+            )
+        assert caught.value.code == 1
+        assert expected in capsys.readouterr().err
+        assert not (output / "real_alert_slices.json").exists()
+        assert not (output / "ztf_proxy_alerts.csv").exists()
