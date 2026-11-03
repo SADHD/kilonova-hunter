@@ -65,5 +65,8 @@ jobs:
       - name: Check for mistakes with Ruff
         run: uv run ruff check
 
+      - name: Check formatting with Ruff
+        run: uv run ruff format --check
+
       - name: Run tests
         run: uv run pytest
