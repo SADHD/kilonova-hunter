@@ -485,6 +485,8 @@ def _run_score_test(args) -> None:
     try:
         combo = {}
         for name in _FROZEN_CUT_KEYS:
+            if isinstance(cuts[name], bool):
+                raise ValueError
             value = float(cuts[name])
             # float("nan") and float("inf") succeed. They are not cuts.
             if value != value or value in (float("inf"), float("-inf")):

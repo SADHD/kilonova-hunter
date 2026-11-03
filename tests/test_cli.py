@@ -2240,6 +2240,108 @@ def test_exposure_note_is_recorded_and_is_not_in_the_score_once_key(
     assert test_set_sha256(loaded) == test_hash
 
 
+@pytest.mark.parametrize("source", ["pending", "claim"])
+def test_overlap_layers_work_independently(source, tmp_path, scored_test_set_ledger):
+    from kilonova_hunter import cli
+
+    entry = {"status": "pending", "object_ids": {"2017-like": ["old"]}}
+    if source == "pending":
+        scored_test_set_ledger.write_text(json.dumps({"sets": {"hash": [entry]}}))
+    else:
+        claims = cli.test_set_claim_dir()
+        claims.mkdir(parents=True)
+        (claims / "claim.json").write_text(json.dumps(entry))
+    assert cli._previously_scored_ids() == {"2017-like": {"old"}}
+
+
+def test_same_hash_rescore_preserves_pending_history(tmp_path, scored_test_set_ledger):
+    from kilonova_hunter import cli
+    from kilonova_hunter.sample import _read_cache
+
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    loaded = [
+        (kind, *_read_cache(cache / kind / "test"))
+        for kind in ("2017-like", "realistic")
+    ]
+    cli._write_pending_score("same", {}, loaded, git_sha="test", scored_at="first")
+    old = json.loads(scored_test_set_ledger.read_text())["sets"]["same"][0]
+    # The first run crashed; the approved rescore uses exactly the same identity.
+    cli._write_pending_score(
+        "same", {}, loaded, git_sha="test", scored_at="second", decision_id="approved"
+    )
+    score = tmp_path / "synthetic-score.md"
+    score.write_text("fixture")
+    cli._complete_pending_score("same", score)
+    entries = json.loads(scored_test_set_ledger.read_text())["sets"]["same"]
+    assert [entry["status"] for entry in entries] == ["pending", "complete"]
+    assert entries[0] == old
+
+
+def test_completion_requires_last_entry_pending(tmp_path, scored_test_set_ledger):
+    from kilonova_hunter import cli
+
+    payload = {"sets": {"same": [{"status": "pending"}, {"status": "complete"}]}}
+    scored_test_set_ledger.write_text(json.dumps(payload))
+    before = scored_test_set_ledger.read_bytes()
+    score = tmp_path / "synthetic-score.md"
+    score.write_text("fixture")
+    with pytest.raises(SystemExit) as caught:
+        cli._complete_pending_score("same", score)
+    assert caught.value.code == 1
+    assert scored_test_set_ledger.read_bytes() == before
+
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_boolean_cuts_are_refused(bad, tmp_path, scored_test_set_ledger, capsys):
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    payload = json.loads(cuts.read_text())
+    payload["redder_than_g_minus_r"] = bad
+    cuts.write_text(json.dumps(payload))
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--cache",
+                str(tmp_path / "absent"),
+                "--output",
+                str(tmp_path),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "finite number" in capsys.readouterr().err
+    assert not scored_test_set_ledger.exists()
+
+
+def test_zero_byte_curves_refused_before_ledger(
+    tmp_path, scored_test_set_ledger, capsys
+):
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    (cache / "2017-like" / "test" / "light_curves.csv").write_bytes(b"")
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--score-test",
+                "--cuts",
+                str(cuts),
+                "--cache",
+                str(cache),
+                "--output",
+                str(tmp_path),
+            ]
+        )
+    assert caught.value.code == 1
+    assert "empty" in capsys.readouterr().err
+    assert not scored_test_set_ledger.exists()
+    assert not (tmp_path / "test_set_claims").exists()
+
+
 @pytest.mark.parametrize("variant", ["missing_first", "shifted_start", "unknown"])
 def test_fetch_uses_frozen_nights(variant, tmp_path, monkeypatch, capsys):
     from kilonova_hunter import alerts
