@@ -37,6 +37,22 @@ def test_sfd_ebv_is_scaled_by_0_86() -> None:
     assert ebv[1] == pytest.approx(0.5 * SFD_RECALIBRATION)
 
 
+def test_drawn_luminosity_distances_stay_between_10_and_300() -> None:
+    """The volume draw keeps every luminosity distance inside 10 to 300 Mpc.
+
+    The shell is comoving volume, but the edges are luminosity distances.
+    A fake at the far edge is allowed. One past 300 Mpc is not.
+    """
+    pytest.importorskip("scipy")
+    from kilonova_hunter.sky import sample_luminosity_distances
+
+    _redshifts, distances = sample_luminosity_distances(
+        np.random.default_rng(11), 4000
+    )
+    assert distances.min() >= 10.0
+    assert distances.max() <= 300.0
+
+
 def test_planck18_redshift_at_40_mpc_is_near_0_009() -> None:
     """40 Mpc is the AT2017gfo distance. The redshift is about 0.009.
 
