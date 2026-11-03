@@ -537,9 +537,28 @@ def _read_cache(cache_dir: Path) -> tuple[dict, pd.DataFrame, pd.DataFrame] | No
     if not manifest_path.is_file():
         return None
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    events = pd.read_csv(events_path) if events_path.is_file() else pd.DataFrame()
-    curves = pd.read_csv(curves_path) if curves_path.is_file() else _empty_curves()
+    if events_path.is_file():
+        events = _read_events_table(events_path)
+    else:
+        events = pd.DataFrame()
+    if curves_path.is_file() and curves_path.stat().st_size > 0:
+        try:
+            curves = pd.read_csv(curves_path)
+        except pd.errors.EmptyDataError:
+            curves = _empty_curves()
+    else:
+        curves = _empty_curves()
     return manifest, events, curves
+
+
+def _read_events_table(path: Path) -> pd.DataFrame:
+    """Read events.csv. A zero-byte file is refused, not a pandas traceback."""
+    if path.stat().st_size == 0:
+        raise ValueError(f"The events table {path} is empty.")
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError as error:
+        raise ValueError(f"The events table {path} is empty.") from error
 
 
 def _write_cache(

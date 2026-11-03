@@ -1,0 +1,3 @@
+{
+  "exposure_note": "Test-night raw Fink rows were fetched on 2026-11-03 into results/ztf_proxy_alerts.csv before the cuts freeze. results/real_alert_slices.json in the repo already shows 9 test nights and 8,051 test alerts. These totals do not depend on the cuts, and they reveal nothing about our flags. No test-slice flag counts were examined."
+}
