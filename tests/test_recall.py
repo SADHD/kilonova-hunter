@@ -358,8 +358,8 @@ def test_three_days_are_counted_from_the_merger() -> None:
 def test_wide_fast_deep_visits_come_in_pairs() -> None:
     """The default cadence takes two different filters about 30 minutes apart.
 
-    The gap from one pair to the next is between 2 and 4 days, and the
-    first visit is somewhere in that first gap.
+    The gap from one pair to the next is between 2 and 4 days. The first
+    visit after the merger is no later than one of those gaps.
     """
     survey = SurveySettings(cadence="wfd", survey_length_days=12.0)
     times, bands = survey_visits(np.random.default_rng(1), survey)
@@ -376,6 +376,30 @@ def test_wide_fast_deep_visits_come_in_pairs() -> None:
     for first, second in zip(bands[::2], bands[1::2], strict=True):
         assert first != second
         assert frozenset((first, second)) in allowed
+
+
+def test_wide_fast_deep_sequence_starts_before_the_merger() -> None:
+    """Visits run before the merger. The gap that crosses day 0 is 2 to 4 days.
+
+    Returned visits are only the ones at or after the merger. A pair that
+    started earlier is not split.
+    """
+    from kilonova_hunter.recall import _WFD_PRE_MERGER_DAYS, _wfd_pair_starts
+
+    survey = SurveySettings(cadence="wfd", survey_length_days=12.0)
+    rng = np.random.default_rng(2)
+    starts = _wfd_pair_starts(rng, survey)
+    assert float(starts.min()) <= -_WFD_PRE_MERGER_DAYS
+    before = starts[starts < 0.0]
+    after = starts[starts >= 0.0]
+    assert len(before) >= 1
+    assert len(after) >= 1
+    gap_across = float(after[0] - before[-1])
+    assert gap_across >= survey.wfd_gap_min_days - 1e-9
+    assert gap_across <= survey.wfd_gap_max_days + 1e-9
+    times, _bands = survey_visits(np.random.default_rng(2), survey)
+    assert float(times.min()) >= 0.0
+    assert float(times[0]) <= survey.wfd_gap_max_days + 1e-9
 
 
 def test_too_many_model_errors_abort_the_run() -> None:
