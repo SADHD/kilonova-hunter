@@ -5,6 +5,11 @@ import pytest
 
 pytest.importorskip("redback")
 
+import matplotlib
+
+# redback turns LaTeX on at import. This machine has no LaTeX install.
+matplotlib.rcParams["text.usetex"] = False
+
 from kilonova_hunter.redback_fix import (  # noqa: E402
     REQUIRED_REDBACK_VERSION,
     corrected_diffusion,
