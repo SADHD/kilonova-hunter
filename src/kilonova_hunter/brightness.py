@@ -8,7 +8,9 @@ Milky Way correction. This figure subtracts the Fitzpatrick 1999 law
 at E(B-V) = 0.105 and R_V = 3.1, and plots the model with no dust, so
 the two can be compared.
 
-The model is the Table 2 center (no scatter) at 40 Mpc.
+The model is the Table 2 center (no scatter) at 40 Mpc. The light
+curve goes through the diffusion wrapper, so the Arnett factor of 2
+is included. The installed redback package is not edited.
 """
 
 from __future__ import annotations
@@ -104,7 +106,7 @@ def write_brightness_check(
     axis.invert_yaxis()
     axis.set_xlabel("Days after the merger")
     axis.set_ylabel("AB magnitude (brighter is up)")
-    axis.set_title("Three-component Villar model at 40 Mpc vs AT2017gfo")
+    axis.set_title("Villar model at 40 Mpc, diffusion fix, vs AT2017gfo")
     axis.legend(fontsize=8, loc="upper right")
     matplotlib.rcParams["text.usetex"] = False
     figure.tight_layout()

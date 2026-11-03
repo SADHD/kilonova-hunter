@@ -82,3 +82,7 @@ def corrected_diffusion() -> Iterator[None]:
         yield
     finally:
         kilonova_models._kilonova_diffusion_luminosity = original
+        # The model call can turn LaTeX back on. Put it back off.
+        import matplotlib
+
+        matplotlib.rcParams["text.usetex"] = False
