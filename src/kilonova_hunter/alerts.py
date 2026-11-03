@@ -167,6 +167,7 @@ def build_slice_document(
     stop: date,
     class_name: str = FINK_CLASS,
     n_per_day: int = FINK_N_PER_DAY,
+    include_test_flag_counts: bool = False,
 ) -> dict:
     """The frozen description of the two slices. This is what gets committed."""
     tuning, test = split_nights(alerts)
@@ -207,11 +208,34 @@ def build_slice_document(
         "tuning": slice_summary(alerts, tuning),
         "test": slice_summary(alerts, test),
         "flag_columns": ["n_flagged", "n_repeat_flags"],
-        "flag_counts": {
-            "tuning": _slice_flag_counts(alerts, tuning),
-            "test": _slice_flag_counts(alerts, test),
-        },
+        "flag_counts": _flag_counts_for_slices(
+            alerts,
+            tuning,
+            test,
+            include_test=include_test_flag_counts,
+        ),
     }
+
+
+def _flag_counts_for_slices(
+    alerts: pd.DataFrame,
+    tuning: list[int],
+    test: list[int],
+    *,
+    include_test: bool,
+) -> dict:
+    """Tuning-slice flags always. Test-slice flags only after cuts are frozen."""
+    counts: dict = {"tuning": _slice_flag_counts(alerts, tuning)}
+    if include_test:
+        counts["test"] = _slice_flag_counts(alerts, test)
+    else:
+        counts["test"] = {
+            "refused": (
+                "Test-slice flag counts are not written until a frozen-cuts "
+                "file exists."
+            )
+        }
+    return counts
 
 
 def _slice_flag_counts(alerts: pd.DataFrame, nights: list[int]) -> dict:
