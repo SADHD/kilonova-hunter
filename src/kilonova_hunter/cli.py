@@ -325,8 +325,9 @@ def _cuts_are_frozen(path: Path | None) -> bool:
 def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) -> None:
     """Download the ZTF proxy slices and write the frozen JSON.
 
-    Test-slice flag counts are written only when ``cuts`` is a frozen
-    cuts file. Until then only the tuning slice is counted.
+    The command writes nothing until ``cuts`` is a file with
+    ``"frozen": true``. Test-slice flag counts are part of that file,
+    so an unfrozen run exits instead of writing a partial document.
     """
     from datetime import date
 
@@ -336,6 +337,12 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
         write_slice_document,
     )
 
+    if not _cuts_are_frozen(cuts):
+        _fail(
+            "--fetch-alerts does not write until a cuts file with "
+            '"frozen": true exists. Test-slice flag counts are not '
+            "written before the cuts are frozen. Nothing was written."
+        )
     try:
         start_day = date.fromisoformat(start)
         stop_day = date.fromisoformat(stop)
@@ -350,7 +357,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
         alerts,
         start=start_day,
         stop=stop_day,
-        include_test_flag_counts=_cuts_are_frozen(cuts),
+        include_test_flag_counts=True,
     )
     path = output / "real_alert_slices.json"
     write_slice_document(document, path)
@@ -431,6 +438,21 @@ def _run_score_test(args) -> None:
                 "Simulate it before scoring. This command does not simulate."
             )
         manifest, events, curves = loaded
+        expected_n = manifest.get("n_simulated")
+        if expected_n is None or int(expected_n) != len(events):
+            _fail(
+                f"The {population} test cache events do not match n_simulated "
+                f"({expected_n!r} vs {len(events)} rows)."
+            )
+        loaded_sets.append((population, manifest, events, curves))
+    # The same fakes are the same test set even when the cache version,
+    # redback version, diffusion fix, or dust map differ. Refuse that
+    # before the cache-validity checks, so the message is the rescore
+    # refusal rather than a provenance mismatch.
+    identity = test_set_sha256(loaded_sets)
+    if _test_set_already_claimed(identity):
+        _refuse_rescore(identity, fresh_cache=True)
+    for population, manifest, _events, _curves in loaded_sets:
         reason = cache_refusal_reason(manifest)
         if reason is not None:
             _fail(f"The {population} test cache is refused: {reason}")
@@ -443,13 +465,6 @@ def _run_score_test(args) -> None:
                 f"dust_map is {manifest.get('dust_map')!r}. "
                 f"It has to be {expected_map!r}."
             )
-        expected_n = manifest.get("n_simulated")
-        if expected_n is None or int(expected_n) != len(events):
-            _fail(
-                f"The {population} test cache events do not match n_simulated "
-                f"({expected_n!r} vs {len(events)} rows)."
-            )
-        loaded_sets.append((population, manifest, events, curves))
     # Claim the once-only marker before any scoring. The key is the test
     # set itself, stored outside the cache, so a fresh --cache cannot
     # reset it. The create is exclusive. A crash still leaves the claim.
@@ -473,19 +488,24 @@ def _run_score_test(args) -> None:
     print(text)
 
 
-# Pending Science Lead: whether cache_version, redback_version,
-# diffusion_fix, and the dust map belong in this hash. They are included
-# for now. Do not drop them until that ruling.
-_TEST_SET_SPEC_KEYS = (
+# Ruling 12(21): the score-once key is the test set's identity. Software
+# and dust provenance are recorded on the ledger entry and are not part
+# of the hash. There is no flag that overrides the refusal.
+_TEST_SET_IDENTITY_KEYS = (
     "parent_seed",
     "seed",
     "survey",
     "sample_size",
+)
+_TEST_SET_RECORDED_KEYS = (
     "cache_version",
-    "diffusion_fix",
-    "dust_mode",
-    "dust_map",
     "redback_version",
+    "diffusion_fix",
+    "dust_map",
+)
+_RESCORE_NEEDS_A_DECISION = (
+    "A rescore needs a logged decision approved by Sage through PM, "
+    "and both scores must be reported."
 )
 
 
@@ -510,7 +530,11 @@ def test_set_claim_dir() -> Path:
 
 
 def test_set_sha256(loaded_sets: list) -> str:
-    """Hash of seeds, settings, and sorted fake ids. The cache path is not in it."""
+    """Hash of seeds, the population spec, and sorted fake ids.
+
+    ``cache_version``, ``redback_version``, ``diffusion_fix``, and the
+    dust map are not in this hash. The cache path is not in it either.
+    """
     import hashlib
     import json
 
@@ -520,10 +544,67 @@ def test_set_sha256(loaded_sets: list) -> str:
             object_ids = sorted(str(item) for item in events["object_id"].tolist())
         else:
             object_ids = []
-        spec = {key: manifest.get(key) for key in _TEST_SET_SPEC_KEYS}
+        spec = {key: manifest.get(key) for key in _TEST_SET_IDENTITY_KEYS}
         parts.append({"population": population, "spec": spec, "object_ids": object_ids})
     raw = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _provenance(loaded_sets: list) -> dict:
+    """The four fields ruling 12(21) took out of the score-once key."""
+    recorded = {}
+    for population, manifest, _events, _curves in loaded_sets:
+        recorded[population] = {
+            key: manifest.get(key) for key in _TEST_SET_RECORDED_KEYS
+        }
+    return recorded
+
+
+def _git_sha() -> str:
+    """HEAD of this checkout, or ``unknown`` when git cannot say."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_repo_root(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "unknown"
+    if completed.returncode != 0:
+        return "unknown"
+    return completed.stdout.strip() or "unknown"
+
+
+def _scored_at() -> str:
+    """UTC time the ledger entry was written."""
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _test_set_already_claimed(test_hash: str) -> bool:
+    claim = test_set_claim_dir() / test_hash
+    return test_hash in _ledger_hashes() or claim.is_file()
+
+
+def _refuse_rescore(test_hash: str, *, fresh_cache: bool) -> None:
+    """Stop. The same test set is not scored again from this command."""
+    if fresh_cache:
+        detail = (
+            f"Test set {test_hash[:12]} was scored once "
+            f"({test_set_scored_path()}). "
+            "A fresh --cache does not allow another score."
+        )
+    else:
+        detail = (
+            f"Test set {test_hash[:12]} was scored once. "
+            "A different --output or --cache does not allow another score."
+        )
+    _fail(f"{detail} {_RESCORE_NEEDS_A_DECISION}")
 
 
 def _ledger_hashes() -> set[str]:
@@ -536,7 +617,14 @@ def _ledger_hashes() -> set[str]:
     return set(payload.get("sets", {}))
 
 
-def _record_scored_test_set(test_hash: str, combo: dict[str, float]) -> None:
+def _record_scored_test_set(
+    test_hash: str,
+    combo: dict[str, float],
+    loaded_sets: list,
+    *,
+    git_sha: str,
+    scored_at: str,
+) -> None:
     import hashlib
     import json
 
@@ -550,6 +638,9 @@ def _record_scored_test_set(test_hash: str, combo: dict[str, float]) -> None:
     payload.setdefault("sets", {})[test_hash] = {
         "cuts_sha256": hashlib.sha256(cuts.encode("utf-8")).hexdigest(),
         "cuts": combo,
+        "provenance": _provenance(loaded_sets),
+        "git_sha": git_sha,
+        "scored_at": scored_at,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -559,35 +650,49 @@ def _claim_score_once_marker(loaded_sets: list, combo: dict[str, float]) -> None
 
     The ledger lives at ``results/test_set_scored.json``, not in the
     cache. Copying the cache, or pointing ``--cache`` at a fresh folder
-    with the same fakes, does not clear it. A different test set, with
-    different seeds, settings, or fake ids, gets its own claim.
+    with the same fakes, does not clear it. A different seed set gets
+    its own claim. Changing the cache version, redback version, diffusion
+    fix, or dust map does not.
     """
     import json
     import os
 
     test_hash = test_set_sha256(loaded_sets)
     if test_hash in _ledger_hashes():
-        _fail(
-            f"Test set {test_hash[:12]} was scored once "
-            f"({test_set_scored_path()}). "
-            "A fresh --cache does not allow another score."
-        )
+        _refuse_rescore(test_hash, fresh_cache=True)
+    git_sha = _git_sha()
+    scored_at = _scored_at()
     claim = test_set_claim_dir() / test_hash
     claim.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
         descriptor = os.open(claim, flags, 0o644)
     except FileExistsError:
-        _fail(
-            f"Test set {test_hash[:12]} was scored once. "
-            "A different --output or --cache does not allow another score."
+        _refuse_rescore(test_hash, fresh_cache=False)
+    body = (
+        json.dumps(
+            {
+                "test_set_sha256": test_hash,
+                "cuts": combo,
+                "provenance": _provenance(loaded_sets),
+                "git_sha": git_sha,
+                "scored_at": scored_at,
+            },
+            indent=2,
         )
-    body = json.dumps({"test_set_sha256": test_hash, "cuts": combo}, indent=2) + "\n"
+        + "\n"
+    )
     try:
         os.write(descriptor, body.encode("utf-8"))
     finally:
         os.close(descriptor)
-    _record_scored_test_set(test_hash, combo)
+    _record_scored_test_set(
+        test_hash,
+        combo,
+        loaded_sets,
+        git_sha=git_sha,
+        scored_at=scored_at,
+    )
 
 
 def _run_grid(args) -> None:

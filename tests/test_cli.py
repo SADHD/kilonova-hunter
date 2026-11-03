@@ -586,6 +586,9 @@ def _ready_test_cache(cache: Path) -> None:
                     "dust_map": dust_map_label(),
                     "cache_version": CACHE_VERSION,
                     "diffusion_fix": DIFFUSION_FIX_ID,
+                    "redback_version": "1.20.0",
+                    "seed": 7,
+                    "parent_seed": 11,
                     "n_simulated": 0,
                 }
             ),
@@ -770,6 +773,114 @@ def test_a_fresh_cache_does_not_reset_the_score_and_a_new_set_can(
     assert (third / "test_score.md").is_file()
 
 
+def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
+    tmp_path: Path,
+    scored_test_set_ledger: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ruling 12(21): the key is seeds, fake ids, and the population spec.
+
+    cache_version, redback_version, diffusion_fix, and the dust map are
+    recorded, not hashed. Changing one of them does not open a rescore.
+    A different seed does. There is no override flag.
+    """
+    import shutil
+    import subprocess
+
+    from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
+    from kilonova_hunter.sample import CACHE_VERSION
+    from kilonova_hunter.sky import dust_map_label
+
+    assert scored_test_set_ledger == tmp_path / "test_set_scored.json"
+    cuts = _frozen_cuts(tmp_path / "cuts.json", frozen=True)
+    cache = tmp_path / "cache"
+    _ready_test_cache(cache)
+    output = tmp_path / "out"
+    output.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(output),
+            "--cache",
+            str(cache),
+        ]
+    )
+    ledger = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
+    entry = next(iter(ledger["sets"].values()))
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    assert entry["git_sha"] == head
+    assert entry["scored_at"].endswith("Z")
+    for population in ("2017-like", "realistic"):
+        recorded = entry["provenance"][population]
+        assert recorded["cache_version"] == CACHE_VERSION
+        assert recorded["redback_version"] == "1.20.0"
+        assert recorded["diffusion_fix"] == DIFFUSION_FIX_ID
+        assert recorded["dust_map"] == dust_map_label()
+    changes = {
+        "cache_version": 99,
+        "redback_version": "9.9.9",
+        "diffusion_fix": "not-the-fix",
+        "dust_map": "a different map",
+    }
+    for field, value in changes.items():
+        copied = tmp_path / f"cache-{field}"
+        shutil.copytree(cache, copied)
+        for population in ("2017-like", "realistic"):
+            manifest_path = copied / population / "test" / "manifest.json"
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload[field] = value
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+        refused = tmp_path / f"out-{field}"
+        refused.mkdir()
+        with pytest.raises(SystemExit) as caught:
+            main(
+                [
+                    "recall",
+                    "--score-test",
+                    "--cuts",
+                    str(cuts),
+                    "--output",
+                    str(refused),
+                    "--cache",
+                    str(copied),
+                ]
+            )
+        assert caught.value.code == 1
+        err = capsys.readouterr().err
+        assert "logged decision approved by Sage through PM" in err
+        assert "both scores must be reported" in err
+        assert not (refused / "test_score.md").exists()
+    seeded = tmp_path / "cache-seed"
+    shutil.copytree(cache, seeded)
+    for population in ("2017-like", "realistic"):
+        manifest_path = seeded / population / "test" / "manifest.json"
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["seed"] = 99
+        payload["parent_seed"] = 99
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    allowed = tmp_path / "out-seed"
+    allowed.mkdir()
+    main(
+        [
+            "recall",
+            "--score-test",
+            "--cuts",
+            str(cuts),
+            "--output",
+            str(allowed),
+            "--cache",
+            str(seeded),
+        ]
+    )
+    assert (allowed / "test_score.md").is_file()
+    again = json.loads(scored_test_set_ledger.read_text(encoding="utf-8"))
+    assert len(again["sets"]) == 2
+
+
 def _grid_argv(tmp_path: Path) -> list[str]:
     return [
         "recall",
@@ -821,19 +932,30 @@ def test_grid_exits_2_when_the_copy_verdict_fails(
 def test_grid_exits_2_when_caught_but_not_judgeable_is_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A nonzero caught-but-not-judgeable count exits 2, like a sanity FAIL."""
-    from kilonova_hunter.grid import GridRun
+    """A nonzero caught-but-not-judgeable count exits 2, like a sanity FAIL.
 
+    Ruling 12(21): the breach is on a cell that is not the chosen cut.
+    The chosen cell itself is clean. The command still exits 2.
+    """
+    from kilonova_hunter.grid import GridRun, caught_not_judgeable_blocks
+
+    rows = [
+        {"chosen": True, "n_caught_not_judgeable": 0},
+        {"chosen": False, "n_caught_not_judgeable": 1},
+    ]
+    assert caught_not_judgeable_blocks(rows) is True
     monkeypatch.setattr("kilonova_hunter.cli.redback_available", lambda: True)
 
     def fake_grid(**kwargs):
+        blocked = caught_not_judgeable_blocks(rows)
         return GridRun(
             text="tuning grid\n",
-            sign_off_blocker=True,
+            sign_off_blocker=blocked,
             copy_status="caught-but-not-judgeable",
             block_reasons=(
-                "caught-but-not-judgeable is not zero, which breaks rule 5 "
-                "and blocks sign-off",
+                "caught-but-not-judgeable is not zero in a scored cell, "
+                "including one that is not the chosen cut, which breaks "
+                "rule 5 and blocks sign-off",
             ),
         )
 
@@ -844,6 +966,7 @@ def test_grid_exits_2_when_caught_but_not_judgeable_is_nonzero(
     err = capsys.readouterr().err
     assert "blocks sign-off" in err
     assert "rule 5" in err
+    assert "not the chosen cut" in err
 
 
 def test_grid_exits_0_when_the_copy_verdict_passes(
@@ -855,10 +978,10 @@ def test_grid_exits_0_when_the_copy_verdict_passes(
     assert "Sign-off blocker" not in capsys.readouterr().err
 
 
-def test_fetch_alerts_skips_test_slice_flags_until_cuts_are_frozen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_fetch_alerts_refuses_until_cuts_are_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Test-slice flag counts stay unwritten until a frozen cuts file exists."""
+    """Without frozen cuts the command exits and writes nothing."""
     alerts = pd.DataFrame(
         [
             {
@@ -887,51 +1010,46 @@ def test_fetch_alerts_skips_test_slice_flags_until_cuts_are_frozen(
     )
     output = tmp_path / "out"
     output.mkdir()
-    main(
-        [
-            "recall",
-            "--fetch-alerts",
-            "--output",
-            str(output),
-            "--alert-start",
-            "2024-06-01",
-            "--alert-stop",
-            "2024-06-02",
-        ]
-    )
-    document = json.loads(
-        (output / "real_alert_slices.json").read_text(encoding="utf-8")
-    )
-    assert "n_flagged" in document["flag_counts"]["tuning"]
-    assert document["flag_counts"]["test"] == {
-        "refused": (
-            "Test-slice flag counts are not written until a frozen-cuts file exists."
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--fetch-alerts",
+                "--output",
+                str(output),
+                "--alert-start",
+                "2024-06-01",
+                "--alert-stop",
+                "2024-06-02",
+            ]
         )
-    }
+    assert caught.value.code == 1
+    assert "Nothing was written" in capsys.readouterr().err
+    assert not (output / "real_alert_slices.json").exists()
+    assert not (output / "ztf_proxy_alerts.csv").exists()
 
     unfrozen = tmp_path / "unfrozen.json"
     unfrozen.write_text(json.dumps({"frozen": False}), encoding="utf-8")
     still = tmp_path / "still"
     still.mkdir()
-    main(
-        [
-            "recall",
-            "--fetch-alerts",
-            "--output",
-            str(still),
-            "--cuts",
-            str(unfrozen),
-            "--alert-start",
-            "2024-06-01",
-            "--alert-stop",
-            "2024-06-02",
-        ]
-    )
-    still_doc = json.loads(
-        (still / "real_alert_slices.json").read_text(encoding="utf-8")
-    )
-    assert "refused" in still_doc["flag_counts"]["test"]
-    assert "n_flagged" not in still_doc["flag_counts"]["test"]
+    with pytest.raises(SystemExit) as caught:
+        main(
+            [
+                "recall",
+                "--fetch-alerts",
+                "--output",
+                str(still),
+                "--cuts",
+                str(unfrozen),
+                "--alert-start",
+                "2024-06-01",
+                "--alert-stop",
+                "2024-06-02",
+            ]
+        )
+    assert caught.value.code == 1
+    assert not (still / "real_alert_slices.json").exists()
+    assert not (still / "ztf_proxy_alerts.csv").exists()
 
     cuts = tmp_path / "cuts.json"
     cuts.write_text(json.dumps({"frozen": True}), encoding="utf-8")
