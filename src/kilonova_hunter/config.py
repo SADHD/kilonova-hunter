@@ -52,6 +52,9 @@ class Thresholds:
             in the window are closer together than this.
         fade_bands: The filters the fade rule is allowed to use. The
             rule passes when any one of these fades fast enough.
+        max_color_interpolation_gap_days: The longest gap, in days,
+            across which g minus r may be read off the straight line
+            between two points. A wider gap is no data.
     """
 
     fade_faster_than_mag_per_day: float
@@ -63,6 +66,7 @@ class Thresholds:
     reddening_window_days: float
     min_color_separation_days: float
     fade_bands: tuple[str, ...]
+    max_color_interpolation_gap_days: float = 1.0
 
     def __post_init__(self) -> None:
         """Reject settings that cannot describe a fade, a color, or a rise."""
@@ -103,6 +107,11 @@ class Thresholds:
             raise ValueError(
                 "fade_bands needs at least one filter, such as g, r, or i."
             )
+        if self.max_color_interpolation_gap_days <= 0:
+            raise ValueError(
+                "max_color_interpolation_gap_days must be a positive number "
+                f"of days, got {self.max_color_interpolation_gap_days}."
+            )
 
 
 # The fade cut below is signed off. ZTFReST (Andreoni et al. 2021,
@@ -135,6 +144,11 @@ class Thresholds:
 # enough for the demo to have turned red; the color at the peak itself
 # can still be blue. g, r, and i are the bands ZTFReST allows the fade
 # rule to use.
+#
+# max_color_interpolation_gap_days is signed off. Science Lead, Decision
+# Log section 12 item 9: g minus r is read across a gap only when the
+# two points are at most 1.0 day apart. A wider gap is no data. This
+# replaces the earlier instruction not to invent a placeholder.
 THRESHOLDS = Thresholds(
     fade_faster_than_mag_per_day=0.3,
     redder_than_g_minus_r=0.0,
@@ -145,6 +159,7 @@ THRESHOLDS = Thresholds(
     reddening_window_days=2.0,
     min_color_separation_days=0.5,
     fade_bands=("g", "r", "i"),
+    max_color_interpolation_gap_days=1.0,
 )
 
 
