@@ -1,5 +1,5 @@
 quantity,max_abs_difference_mag,limit_mag,passes,source
-g,0.028,0.1,yes,external check against MOSFiT commit 6595248
-r,0.023,0.1,yes,external check against MOSFiT commit 6595248
-i,0.02,0.1,yes,external check against MOSFiT commit 6595248
-bolometric,0.03,0.1,yes,external check against MOSFiT commit 6595248
+g,0.027958,0.1,yes,checks/mosfit/band_sidebyside.py vs MOSFiT commit 6595248
+r,0.023065,0.1,yes,checks/mosfit/band_sidebyside.py vs MOSFiT commit 6595248
+i,0.020296,0.1,yes,checks/mosfit/band_sidebyside.py vs MOSFiT commit 6595248
+bolometric,0.029632,0.1,yes,checks/mosfit/band_sidebyside.py vs MOSFiT commit 6595248
