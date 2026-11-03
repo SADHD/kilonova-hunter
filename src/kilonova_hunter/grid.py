@@ -253,6 +253,37 @@ def chance_wilson_lower_at_least(
     return float(math.exp(biggest) * sum(math.exp(item - biggest) for item in logs))
 
 
+@dataclass(frozen=True)
+class GridRun:
+    """What ``kilohunt recall --grid`` prints, and whether sign-off is blocked.
+
+    ``copy_status`` is ``untestable`` or ``fail`` when the exact-copy
+    verdict blocks sign-off. It is ``None`` when that verdict is a pass.
+    A caught-but-not-judgeable count is not a sign-off blocker here.
+    """
+
+    text: str
+    sign_off_blocker: bool
+    copy_status: str | None
+
+
+def copy_sign_off(copies: dict) -> tuple[bool, str | None]:
+    """Whether the exact-copy verdict blocks sign-off, and which status.
+
+    Definition (a) is the official verdict. Definition (b) blocks
+    sign-off only when the draw stopped on (b). A (b) count from a
+    draw that stopped on (a) is indicative, not a 12(16) result.
+    """
+    stopping = str(copies.get("stopping_definition", "a"))
+    official = copies.get("official") or {}
+    candidate = copies.get("candidate") or {}
+    if official.get("blocker"):
+        return True, str(official.get("status"))
+    if stopping == "b" and candidate.get("blocker"):
+        return True, str(candidate.get("status"))
+    return False, None
+
+
 @dataclass
 class PreparedFake:
     """Measurements reused across the 72 cut combinations.
@@ -1190,11 +1221,14 @@ def run_tuning_grid(
     sample_size=None,
     workers: int = 1,
     settings_path: Path | None = None,
-) -> str:
+) -> GridRun:
     """Simulate both populations and both splits, then score the tuning grid.
 
     The test split is simulated and cached so a later score does not
-    redraw it. It is not scored here. No cut is picked.
+    redraw it. It is not scored here. No cut is picked. The returned
+    run says whether the exact-copy verdict blocks sign-off. The
+    command exits 2 in that case. A caught-but-not-judgeable count
+    does not.
     """
     from kilonova_hunter.sample import (
         LIKE_KIND,
@@ -1246,6 +1280,10 @@ def run_tuning_grid(
         "min_color_separation_days": THRESHOLDS.min_color_separation_days,
     }
     copy_score = score_exact_copies(copies.events, copies.light_curves, placeholder)
+    # The default draw stops on definition (a). A later caller that
+    # stops on (b) must say so, or (b) is only indicative.
+    copy_score["stopping_definition"] = "a"
+    blocked, copy_status = copy_sign_off(copy_score)
     destination = Path(output_dir)
     write_grid_csv(rows, destination / "tuning_grid.csv")
     text = summarize_grid(
@@ -1260,7 +1298,7 @@ def run_tuning_grid(
     if worst:
         text = worst + "\n" + text
     (destination / "tuning_grid.md").write_text(text, encoding="utf-8")
-    return text
+    return GridRun(text=text, sign_off_blocker=blocked, copy_status=copy_status)
 
 
 def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:

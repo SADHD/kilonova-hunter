@@ -369,6 +369,37 @@ def test_judgeable_copy_records_a_skipped_reddening_rule() -> None:
     assert "window 2 days" in text
 
 
+def test_copy_sign_off_follows_the_official_verdict_unless_the_draw_stopped_on_b() -> (
+    None
+):
+    """(b) from a draw that stopped on (a) does not block the process exit."""
+    from kilonova_hunter.grid import copy_sign_off
+
+    untestable = {"status": "untestable", "blocker": True}
+    failed = {"status": "fail", "blocker": True}
+    passed = {"status": "pass", "blocker": False}
+    blocked, status = copy_sign_off(
+        {"official": untestable, "candidate": untestable, "stopping_definition": "a"}
+    )
+    assert blocked is True
+    assert status == "untestable"
+    blocked, status = copy_sign_off(
+        {"official": failed, "candidate": passed, "stopping_definition": "a"}
+    )
+    assert blocked is True
+    assert status == "fail"
+    blocked, status = copy_sign_off(
+        {"official": passed, "candidate": untestable, "stopping_definition": "a"}
+    )
+    assert blocked is False
+    assert status is None
+    blocked, status = copy_sign_off(
+        {"official": passed, "candidate": failed, "stopping_definition": "b"}
+    )
+    assert blocked is True
+    assert status == "fail"
+
+
 def test_sanity_copy_verdict_is_pass_fail_or_untestable() -> None:
     """Untestable blocks sign-off. It is not a pass and not blocker False."""
     from kilonova_hunter.grid import sanity_copy_verdict
