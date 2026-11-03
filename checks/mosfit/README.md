@@ -14,7 +14,10 @@ files still import the mosfit package, so they are not executed.
 reimplementation of those formulas.
 
 Run from the repository root, with the sim extra installed
-(`uv sync --extra sim`):
+(`uv sync --extra sim`). `bootstrap.install` points sncosmo at
+`sncosmo_bandpasses/`, the CSP, SDSS, DES, PS1, and LSST curves these
+scripts evaluate, so a fresh machine does not download them. redback and
+bilby logs go to stderr. The saved `.out` files are stdout only.
 
 | Script | What it checks |
 | --- | --- |

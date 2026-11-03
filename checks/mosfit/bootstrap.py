@@ -7,19 +7,49 @@ Run the checks from the repository root:
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
+import warnings
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+# sncosmo reads this before it fetches a bandpass. The files under it are
+# the CSP, SDSS, DES, PS1, and LSST curves these checks evaluate.
+SNCOSMO_DATA = HERE / "sncosmo_bandpasses"
 
 
 def install() -> None:
-    """Make ``sidebyside_lib`` and ``kilonova_hunter`` importable."""
+    """Make ``sidebyside_lib`` and ``kilonova_hunter`` importable.
+
+    Also point sncosmo at the bandpasses committed in this folder, and
+    send library logs and warnings to stderr. The result table stays on
+    stdout.
+    """
     for path in (HERE, ROOT):
         text = str(path)
         if text not in sys.path:
             sys.path.insert(0, text)
+    os.environ["SNCOSMO_DATA_DIR"] = str(SNCOSMO_DATA)
+    _library_output_to_stderr()
+
+
+def _library_output_to_stderr() -> None:
+    """redback, bilby, and Python warnings write to stderr, not the table."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(name)s %(levelname)s : %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+    def showwarning(message, category, filename, lineno, file=None, line=None):
+        sys.stderr.write(
+            warnings.formatwarning(message, category, filename, lineno, line)
+        )
+
+    warnings.showwarning = showwarning
 
 
 def load_waxman_l_int(path: Path | None = None) -> tuple[list[float], list[float]]:

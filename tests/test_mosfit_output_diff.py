@@ -1,4 +1,4 @@
-"""The MOSFiT output check ignores log timestamps and float noise."""
+"""The MOSFiT output check allows float noise and nothing else on stdout."""
 
 from __future__ import annotations
 
@@ -15,15 +15,16 @@ def _compare():
     return module.compare
 
 
-def test_float_noise_and_log_lines_are_not_failures() -> None:
+def test_float_noise_is_allowed_and_extra_stdout_is_not() -> None:
     compare = _compare()
-    found = (
-        "11:01 redback WARNING : missing\n"
-        "Downloading https://sncosmo.github.io/data/bandpasses/csp/g.dat [Done]\n"
+    assert compare("value +0.423\n", "value +0.4231\n") == []
+    download = (
+        "Downloading https://sncosmo.github.io/data/bandpasses/csp/"
+        "i_tel_ccd_atm_ext_1.2.dat [Done]\n"
         "value +0.423\n"
     )
-    expected = "09:00 redback INFO    : ready\nvalue +0.4231\n"
-    assert compare(found, expected) == []
+    assert compare(download, "value +0.423\n")
+    assert compare("redback WARNING : missing\nvalue +0.423\n", "value +0.423\n")
 
 
 def test_a_real_number_change_or_a_count_change_fails() -> None:
