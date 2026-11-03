@@ -885,7 +885,7 @@ def run_tuning_grid(
                     settings=settings,
                 )
             )
-            prepared_for_examples[population] = (prepared[3.0], sample.light_curves)
+            prepared_for_examples[population] = (prepared, sample.light_curves)
     copies = simulate_exact_copies(dust=dust, cache_dir=cache_dir, workers=workers)
     placeholder = {
         "redder_than_g_minus_r": THRESHOLDS.redder_than_g_minus_r,
@@ -912,28 +912,33 @@ def run_tuning_grid(
 
 
 def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
-    """Lead with the investigation when any fake is caught but not judgeable."""
+    """Lead with the investigation when any fake is caught but not judgeable.
+
+    The check covers days 3, 5, and 7. A hit on day 7 is still reported.
+    That case is a rule mismatch, not a bug in the day-D cutoff, and the
+    official judgeable rule is left as it is.
+    """
     headline = [
         row
         for row in rows
         if row["distance_bin"] == "all"
-        and float(row["day"]) == 3.0
+        and float(row["day"]) in JUDGE_DAYS
         and int(row["n_caught_not_judgeable"]) > 0
     ]
     if not headline:
         return ""
     worst = max(headline, key=lambda row: int(row["n_caught_not_judgeable"]))
     population = worst["population"]
-    prepared, curves = prepared_for_examples[population]
+    prepared_by_day, curves = prepared_for_examples[population]
+    day = float(worst["day"])
+    prepared = prepared_by_day[day]
     combo = {
         "redder_than_g_minus_r": worst["redder_than_g_minus_r"],
         "min_g_minus_r_rise": worst["min_g_minus_r_rise"],
         "reddening_window_days": worst["reddening_window_days"],
         "min_color_separation_days": worst["min_color_separation_days"],
     }
-    examples = examples_caught_but_not_judgeable(
-        prepared, curves, combo, day=float(worst["day"])
-    )
+    examples = examples_caught_but_not_judgeable(prepared, curves, combo, day=day)
     lines = [
         "# Caught but not judgeable",
         "",
