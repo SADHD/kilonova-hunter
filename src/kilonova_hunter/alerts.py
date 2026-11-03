@@ -248,13 +248,17 @@ def average_flags_per_night(
     alerts: pd.DataFrame,
     thresholds: Thresholds | None = None,
 ) -> dict:
-    """Flagged objects divided by the number of nights in ``alerts``.
+    """Average of the nightly candidate counts.
 
-    An object is flagged when the v1 rules, run on the light curve built
-    from its alerts, say it is a candidate. The average is that count
-    divided by the number of distinct nights. This is the plumbing the
-    contamination limit will use. It is not applied to the v1 grid until
-    the frozen slices have been logged.
+    Each night is scored with only the alerts from that night and from
+    earlier nights. An alert from a later night is not visible yet, so
+    an object is not flagged on a night before the points that make it
+    a candidate have arrived. The same object can count on more than
+    one night. ``n_flagged`` is the sum of those nightly counts, and
+    ``flags_per_night`` is that sum divided by the number of nights.
+
+    This is the plumbing the contamination limit will use. It is not
+    applied to the grid until the team says to apply it.
     """
     settings = resolve_thresholds(thresholds)
     if alerts.empty:
@@ -265,16 +269,26 @@ def average_flags_per_night(
         working["night"] = ztf_night(np.asarray(mjd, dtype=float)).astype(int)
     if "mjd" not in working.columns:
         working["mjd"] = jd_to_mjd(working["i:jd"].to_numpy(dtype=float))
-    nights = working["night"].nunique()
+    ordered = sorted(int(night) for night in working["night"].unique())
+    total = 0
+    for night in ordered:
+        seen = working.loc[working["night"] <= night]
+        total += _flagged_objects(seen, settings)
+    nights = len(ordered)
+    return {
+        "n_nights": nights,
+        "n_flagged": int(total),
+        "flags_per_night": float(total / nights) if nights else float("nan"),
+    }
+
+
+def _flagged_objects(alerts: pd.DataFrame, settings: Thresholds) -> int:
+    """How many objects in this table are candidates right now."""
     flagged = 0
-    for _object_id, group in working.groupby("i:objectId", sort=False):
+    for _object_id, group in alerts.groupby("i:objectId", sort=False):
         curve = light_curve_from_alerts(group)
         if curve.empty:
             continue
         if is_kilonova_candidate(curve, settings).is_candidate:
             flagged += 1
-    return {
-        "n_nights": int(nights),
-        "n_flagged": int(flagged),
-        "flags_per_night": float(flagged / nights) if nights else float("nan"),
-    }
+    return flagged
