@@ -38,7 +38,13 @@ def test_sfd_ebv_is_scaled_by_0_86() -> None:
 
 
 def test_planck18_redshift_at_40_mpc_is_near_0_009() -> None:
-    """40 Mpc is the AT2017gfo distance. The redshift is about 0.009."""
+    """40 Mpc is the AT2017gfo distance. The redshift is about 0.009.
+
+    ``astropy.cosmology.Planck18`` needs scipy to turn a distance into
+    a redshift. The default ``uv sync`` used by CI does not install the
+    sim extra, so this test skips there. ``uv sync --extra sim`` runs it.
+    """
+    pytest.importorskip("scipy")
     redshift = redshift_at_luminosity_distance(40.0)
     assert 0.008 < redshift < 0.010
 
