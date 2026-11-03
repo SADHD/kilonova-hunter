@@ -187,8 +187,8 @@ def test_dense_grid_bolometric_ratios_stay_off_the_sparse_mistake() -> None:
         comment="#",
     )
     redshift = redshift_at_luminosity_distance(EXACT_DISTANCE_MPC)
-    user_source_seconds = waxman["time_days"].to_numpy(dtype=float) * 86400.0 / (
-        1.0 + redshift
+    user_source_seconds = (
+        waxman["time_days"].to_numpy(dtype=float) * 86400.0 / (1.0 + redshift)
     )
     source_seconds = get_optimal_time_array(
         1e-2, 7e6, 300, user_times=user_source_seconds
