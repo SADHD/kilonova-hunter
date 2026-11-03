@@ -986,7 +986,23 @@ def _combo_sentence(row: dict) -> str:
         f"{recall_text}; {catch_text}; "
         f"judgeable fraction {100.0 * row['judgeable_fraction']:.1f}%; "
         f"reddening skipped on {row['n_reddening_skipped']} flagged fakes."
+        f"{_power_clause(row.get('power_at_70', float('nan')))}"
     )
+
+
+def _power_clause(value: float) -> str:
+    """How to print the chance of clearing a 70 percent recall.
+
+    A chance like 3e-80 is a real number, but printing it that way looks
+    like a bug. Anything that small is about 0.
+    """
+    if value != value:
+        return ""
+    if value < 5e-4:
+        shown = "about 0"
+    else:
+        shown = f"{value:.2f}"
+    return f" Chance the Wilson lower bound clears 70% recall: {shown}."
 
 
 def _copy_lines(copies: dict) -> list[str]:
