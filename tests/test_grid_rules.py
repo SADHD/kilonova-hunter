@@ -7,6 +7,7 @@ import pytest
 from kilonova_hunter.config import THRESHOLDS
 from kilonova_hunter.grid import (
     PreparedFake,
+    _worst_not_judgeable,
     chance_wilson_lower_at_least,
     fast_verdict_matches_filter,
     grid_combinations,
@@ -197,6 +198,46 @@ def test_far_distance_bin_ends_at_300_and_includes_300() -> None:
     assert near["n_total"] == 0
     assert middle["n_total"] == 1
     assert far["n_total"] == 1
+
+
+def test_caught_but_not_judgeable_check_includes_day_7() -> None:
+    """A day-7 hit is reported even when days 3 and 5 are clean.
+
+    The day-7 fake is a rule mismatch. The checker has to show it.
+    The official judgeable rule is not changed to hide it.
+    """
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    fake = PreparedFake(
+        object_id="realistic-tuning-08304",
+        distance_mpc=61.8,
+        judgeable=False,
+        model_failed=False,
+        fade_passed=True,
+        color_value=0.5,
+        rises={(2.0, 0.5): None},
+    )
+
+    def row(day: float, count: int) -> dict:
+        return {
+            "distance_bin": "all",
+            "day": day,
+            "n_caught_not_judgeable": count,
+            "population": "realistic",
+            **combo,
+        }
+
+    text = _worst_not_judgeable(
+        [row(3.0, 0), row(5.0, 0), row(7.0, 1)],
+        {"realistic": ({3.0: [], 5.0: [], 7.0: [fake]}, pd.DataFrame())},
+    )
+    assert "day 7" in text
+    assert "realistic-tuning-08304" in text
+    assert "SIGN-OFF" not in text
 
 
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
