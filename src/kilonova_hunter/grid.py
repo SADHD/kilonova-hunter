@@ -600,9 +600,10 @@ def score_exact_copies(
 ) -> dict:
     """How many exact copies are judgeable, and how many of those are caught.
 
-    Copies are not in the recall. Below 95 percent of the judgeable
-    copies caught is a sign-off blocker. Misses are listed with the
-    start time, the sky position, E(B-V), and the rule that failed.
+    Copies are not in the recall. Zero judgeable copies is a sign-off
+    blocker, and so is catching fewer than 95 percent of the judgeable
+    copies. Misses are listed with the start time, the sky position,
+    E(B-V), and the rule that failed.
     """
     if events.empty:
         return {
@@ -645,12 +646,14 @@ def score_exact_copies(
             }
         )
     fraction = float(n_caught / n_judge) if n_judge else float("nan")
+    # No judgeable copy is not a pass. A NaN fraction used to hide that.
+    blocker = n_judge == 0 or fraction < 0.95
     return {
         "n_copies": int(len(events)),
         "n_judgeable": n_judge,
         "n_caught_judgeable": n_caught,
         "fraction_judgeable_caught": fraction,
-        "blocker": (not math.isnan(fraction)) and fraction < 0.95,
+        "blocker": blocker,
         "misses": misses,
         "day": day,
         "cuts": combo,
