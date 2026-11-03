@@ -1,3 +1,7 @@
+17:16 redback WARNING : No module named 'lalsimulation'
+17:16 redback WARNING : lalsimulation is not installed. Some EOS based models will not work. Please use bilby eos or pass your own EOS generation class to the model
+17:16 bilby INFO    : Running bilby version: 2.8.2
+17:16 redback INFO    : Running redback version: 1.20.0
  t(d)   MOSFiT-grid      redback x2      exact quad    rbx2/MOSFiT   dmag
   0.3  4.2761e+41  4.3542e+41  4.3342e+41   1.0183   -0.020
   0.5  5.3167e+41  5.4401e+41  5.4220e+41   1.0232   -0.025

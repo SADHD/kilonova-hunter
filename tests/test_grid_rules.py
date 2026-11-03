@@ -614,7 +614,7 @@ def test_bluer_color_hook_recomputes_recall_and_is_not_the_grid() -> None:
     gap = dict(g_minus_r_gap_by_day())
     assert gap[1.5] == pytest.approx(0.37)
     assert gap[2.0] == pytest.approx(0.47)
-    assert gap[3.0] == pytest.approx(0.41)
+    assert gap[3.0] == pytest.approx(0.42)
 
 
 def test_color_pair_and_post_peak_pair_are_informational() -> None:

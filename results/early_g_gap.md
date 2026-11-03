@@ -20,7 +20,7 @@ This is not a bar. It does not block the rerun.
 
 The model-minus-AT2017gfo g−r gap is read from
 `checks/mosfit/gr_gap.out` (robust night interpolation): +0.37 mag at
-1.5 days, +0.47 mag at 2 days, and +0.41 mag at 3 days, about
+1.5 days, +0.47 mag at 2 days, and +0.42 mag at 3 days, about
 0.4 ± 0.05 mag. The sensitivity report runs the hook at +0.4 mag and
 at +0.3 mag and prints both recalls plus their difference, which is
 the instrument-to-LSST correction uncertainty. A grid run includes

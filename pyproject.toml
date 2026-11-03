@@ -51,15 +51,16 @@ markers = [
 line-length = 88
 target-version = "py312"
 src = ["src", "tests", "notebooks"]
-# The MOSFiT comparison keeps the line-by-line formulas in the form they
-# were checked. pip mosfit does not build on Python 3.10+, and these
-# scripts are not part of the harness style.
-extend-exclude = ["checks/mosfit"]
 
 [tool.ruff.lint]
 # E and F catch real mistakes. I sorts imports. UP modernizes syntax.
 # B flags a few easy-to-miss bugs, such as a mutable default argument.
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# bootstrap.install() has to run before these scripts import sidebyside_lib
+# and kilonova_hunter. Every other check in the file still runs.
+"checks/mosfit/*.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["kilonova_hunter"]
