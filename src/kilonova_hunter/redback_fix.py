@@ -43,6 +43,7 @@ DIFFUSION_FIX_ID = "arnett-factor-2"
 _PATCH_LOCK = threading.RLock()
 _PATCH_DEPTH = 0
 _PATCH_ORIGINAL = None
+_SAVED_USETEX: bool | None = None
 
 
 def installed_redback_version() -> str:
@@ -78,26 +79,33 @@ def corrected_diffusion() -> Iterator[None]:
     setting is put back to the value it had on the way in. redback
     turns that setting on during the call.
     """
-    global _PATCH_DEPTH, _PATCH_ORIGINAL
+    global _PATCH_DEPTH, _PATCH_ORIGINAL, _SAVED_USETEX
 
     require_redback_1_20_0()
     import matplotlib
     from redback.transient_models import kilonova_models
 
-    previous_usetex = bool(matplotlib.rcParams["text.usetex"])
     with _PATCH_LOCK:
-        _PATCH_DEPTH += 1
-        if _PATCH_DEPTH == 1:
-            original = kilonova_models._kilonova_diffusion_luminosity
+        if _PATCH_DEPTH == 0:
+            current = kilonova_models._kilonova_diffusion_luminosity
+            if getattr(current, "_hunter_diffusion_fix", False):
+                raise RuntimeError(
+                    "The diffusion fix is already applied. "
+                    "Refusing to wrap it again, which would multiply by 4."
+                )
+            # Read usetex inside the lock. A second thread must not
+            # record the value redback already changed.
+            _SAVED_USETEX = bool(matplotlib.rcParams["text.usetex"])
 
             def fixed(time, thermalised_luminosity, diffusion_timescale):
                 # The 2 is the missing piece of (2 t / t_d^2) in the integral.
                 # t_d is the third argument and is not changed.
-                return 2.0 * original(time, thermalised_luminosity, diffusion_timescale)
+                return 2.0 * current(time, thermalised_luminosity, diffusion_timescale)
 
             fixed._hunter_diffusion_fix = True  # type: ignore[attr-defined]
-            _PATCH_ORIGINAL = original
+            _PATCH_ORIGINAL = current
             kilonova_models._kilonova_diffusion_luminosity = fixed
+        _PATCH_DEPTH += 1
         try:
             yield
         finally:
@@ -105,4 +113,5 @@ def corrected_diffusion() -> Iterator[None]:
             if _PATCH_DEPTH == 0 and _PATCH_ORIGINAL is not None:
                 kilonova_models._kilonova_diffusion_luminosity = _PATCH_ORIGINAL
                 _PATCH_ORIGINAL = None
-            matplotlib.rcParams["text.usetex"] = previous_usetex
+                matplotlib.rcParams["text.usetex"] = bool(_SAVED_USETEX)
+                _SAVED_USETEX = None
