@@ -1740,7 +1740,7 @@ def test_grid_exits_0_when_the_copy_verdict_passes(
 
 
 def _proxy_alerts() -> pd.DataFrame:
-    """Two nights. 60000 is the tuning night and 60001 is the other night."""
+    """Two nights. 60461 is the tuning night and 60462 is the other night."""
     return pd.DataFrame(
         [
             {
@@ -1750,7 +1750,7 @@ def _proxy_alerts() -> pd.DataFrame:
                 "i:magpsf": 20.0,
                 "i:sigmapsf": 0.05,
                 "mjd": 50000.0,
-                "night": 60000,
+                "night": 60461,
             },
             {
                 "i:objectId": "test-night-object",
@@ -1759,7 +1759,7 @@ def _proxy_alerts() -> pd.DataFrame:
                 "i:magpsf": 20.0,
                 "i:sigmapsf": 0.05,
                 "mjd": 50001.0,
-                "night": 60001,
+                "night": 60462,
             },
         ]
     )
@@ -1769,21 +1769,21 @@ def _assert_unfrozen_fetch_is_tuning_only(
     output: Path, printed: str, logged: str
 ) -> None:
     """No other-night row, count, or total in the files, stdout, or log."""
-    text = (output / "real_alert_slices.json").read_text(encoding="utf-8")
+    text = (output / "real_alert_slices_fetched.json").read_text(encoding="utf-8")
     document = json.loads(text)
     assert "test" not in document
     assert "test" not in document["flag_counts"]
     assert "n_flagged" in document["flag_counts"]["tuning"]
-    assert "60001" not in text
+    assert "60462" not in text
     assert "test-night-object" not in text
     tuning_csv = (output / "ztf_proxy_alerts_tuning.csv").read_text(encoding="utf-8")
     assert "tuning-object" in tuning_csv
-    assert "60001" not in tuning_csv
+    assert "60462" not in tuning_csv
     assert "test-night-object" not in tuning_csv
     assert not (output / "ztf_proxy_alerts.csv").exists()
     blob = printed + "\n" + logged
     assert "Test:" not in blob
-    assert "60001" not in blob
+    assert "60462" not in blob
     assert "test-night-object" not in blob
 
 
@@ -1861,7 +1861,7 @@ def test_unfrozen_fetch_writes_no_test_night_rows(
         ]
     )
     frozen = json.loads(
-        (frozen_out / "real_alert_slices.json").read_text(encoding="utf-8")
+        (frozen_out / "real_alert_slices_fetched.json").read_text(encoding="utf-8")
     )
     assert "n_flagged" in frozen["flag_counts"]["test"]
     assert "refused" not in frozen["flag_counts"]["test"]
@@ -2149,7 +2149,7 @@ def test_tuning_path_never_counts_a_test_night(
     from kilonova_hunter.grid import pick_with_tuning_alerts
 
     mixed = _alerts_with_both_nights()
-    tuning_nights = {60000}
+    tuning_nights = {60461}
     output = tmp_path / "out"
     output.mkdir()
     mixed.to_csv(output / "ztf_proxy_alerts_tuning.csv", index=False)
@@ -2179,13 +2179,13 @@ def test_tuning_path_never_counts_a_test_night(
     clean.to_csv(output / "ztf_proxy_alerts_tuning.csv", index=False)
     clean_pick = pick_with_tuning_alerts(_pick_rows(), output)
     assert mixed_pick["flags_per_night"] == clean_pick["flags_per_night"]
-    assert mixed_pick["fink_nights"] == clean_pick["fink_nights"] == [60000]
+    assert mixed_pick["fink_nights"] == clean_pick["fink_nights"] == [60461]
     assert mixed_pick["fink_n_flagged"] == clean_pick["fink_n_flagged"] == 0
     assert mixed_pick["redder_than_g_minus_r"] == clean_pick["redder_than_g_minus_r"]
     assert seen
     for nights in seen:
         assert nights <= tuning_nights
-        assert 60001 not in nights
+        assert 60462 not in nights
     assert "ztf_proxy_alerts_tuning.csv" in opened
     assert "ztf_proxy_alerts.csv" not in opened
 
@@ -2238,3 +2238,66 @@ def test_exposure_note_is_recorded_and_is_not_in_the_score_once_key(
         lambda: ("a different sentence", "results/test_set_exposure.json"),
     )
     assert test_set_sha256(loaded) == test_hash
+
+
+@pytest.mark.parametrize("variant", ["missing_first", "shifted_start", "unknown"])
+def test_fetch_uses_frozen_nights(variant, tmp_path, monkeypatch, capsys):
+    from kilonova_hunter import alerts
+
+    frozen = alerts.FROZEN_SPLIT_PATH
+    before = frozen.read_bytes()
+    split = json.loads(before)
+    nights = sorted(split["tuning"]["nights"] + split["test"]["nights"])
+    frame = pd.DataFrame([dict(_proxy_alerts().iloc[0], night=n) for n in nights])
+    if variant == "unknown":
+        frame.loc[len(frame)] = dict(frame.iloc[0], night=99999)
+    else:
+        frame = frame.loc[frame["night"] != 60461]
+    monkeypatch.setattr(alerts, "fetch_class_between", lambda *a, **k: frame.copy())
+    output = tmp_path / "out"
+    output.mkdir()
+    # A sentinel also protects an output-local frozen document from replacement.
+    local_split = output / "real_alert_slices.json"
+    local_split.write_bytes(before)
+    argv = [
+        "recall",
+        "--fetch-alerts",
+        "--output",
+        str(output),
+        "--alert-start",
+        "2024-06-02" if variant == "shifted_start" else "2024-06-01",
+        "--alert-stop",
+        "2024-06-20",
+    ]
+    if variant == "unknown":
+        with pytest.raises(SystemExit) as caught:
+            main(argv)
+        assert caught.value.code == 1
+        assert list(output.iterdir()) == [local_split]
+    else:
+        main(argv)
+        kept = pd.read_csv(output / "ztf_proxy_alerts_tuning.csv")
+        assert set(kept["night"]) == set(split["tuning"]["nights"]) - {60461}
+        assert not set(kept["night"]) & set(split["test"]["nights"])
+        summary = (output / "real_alert_slices_fetched.json").read_text()
+        printed = capsys.readouterr()
+        assert '"test"' not in summary
+        assert "Test:" not in printed.out
+        for night in split["test"]["nights"]:
+            assert str(night) not in summary + printed.out + printed.err
+    assert frozen.read_bytes() == before
+    assert local_split.read_bytes() == before
+
+
+def test_missing_frozen_split_refuses_before_writes(tmp_path, monkeypatch, capsys):
+    from kilonova_hunter import alerts
+
+    monkeypatch.setattr(alerts, "FROZEN_SPLIT_PATH", tmp_path / "missing.json")
+    monkeypatch.setattr(alerts, "fetch_class_between", lambda *a, **k: _proxy_alerts())
+    output = tmp_path / "out"
+    output.mkdir()
+    with pytest.raises(SystemExit) as caught:
+        main(["recall", "--fetch-alerts", "--output", str(output)])
+    assert caught.value.code == 1
+    assert "frozen night lists" in capsys.readouterr().err
+    assert list(output.iterdir()) == []
