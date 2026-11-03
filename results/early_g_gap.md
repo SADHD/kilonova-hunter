@@ -18,10 +18,13 @@ by `scripts/record_mosfit_external_check.py`.
 
 This is not a bar. It does not block the rerun.
 
-The model is too red in g−r by +0.37 mag at 1.5 days, +0.47 mag at
-2 days, and +0.41 mag at 3 days, about 0.4 ± 0.05 mag. The sensitivity
-hook `grid.recall_with_bluer_color` uses that gap. Its default offset
-is +0.4 mag, inside 0.3 to 0.47. The tuning grid does not call it.
+The model-minus-AT2017gfo g−r gap is read from
+`checks/mosfit/gr_gap.out` (robust night interpolation): +0.37 mag at
+1.5 days, +0.47 mag at 2 days, and +0.41 mag at 3 days, about
+0.4 ± 0.05 mag. The sensitivity report runs the hook at +0.4 mag and
+at +0.3 mag and prints both recalls plus their difference, which is
+the instrument-to-LSST correction uncertainty. A grid run includes
+that report. The numbers are not used to pick a cut.
 
 A positive residual below means the model is fainter than the
 dereddened point. The per-epoch residuals are in

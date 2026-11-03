@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from itertools import product
 from pathlib import Path
 
@@ -257,14 +258,16 @@ def chance_wilson_lower_at_least(
 class GridRun:
     """What ``kilohunt recall --grid`` prints, and whether sign-off is blocked.
 
-    ``copy_status`` is ``untestable`` or ``fail`` when the exact-copy
-    verdict blocks sign-off. It is ``None`` when that verdict is a pass.
-    A caught-but-not-judgeable count is not a sign-off blocker here.
+    ``copy_status`` is ``untestable``, ``fail``, or
+    ``caught-but-not-judgeable`` when sign-off is blocked. It is
+    ``None`` when nothing blocks. A nonzero caught-but-not-judgeable
+    count blocks, the same as a sanity FAIL.
     """
 
     text: str
     sign_off_blocker: bool
     copy_status: str | None
+    block_reasons: tuple[str, ...] = ()
 
 
 def copy_sign_off(copies: dict) -> tuple[bool, str | None]:
@@ -282,6 +285,15 @@ def copy_sign_off(copies: dict) -> tuple[bool, str | None]:
     if stopping == "b" and candidate.get("blocker"):
         return True, str(candidate.get("status"))
     return False, None
+
+
+def caught_not_judgeable_blocks(rows: list[dict]) -> bool:
+    """True when any scored cell caught a fake the judgeable rule rejected.
+
+    Rule 5 requires that count to be 0. A nonzero count blocks sign-off
+    the same way a sanity FAIL does.
+    """
+    return any(int(row.get("n_caught_not_judgeable", 0)) > 0 for row in rows)
 
 
 @dataclass
@@ -509,11 +521,38 @@ def _rates(caught: int, judge_caught: int, judgeable: int, total: int) -> dict:
     }
 
 
-# Measured model g-r minus AT2017gfo in the 1.5-3 day window.
-# +0.37 at 1.5 d, +0.47 at 2 d, +0.41 at 3 d. The default offset is
-# the middle of that range. The hook is not called by the tuning grid.
+# Measured model g-r minus AT2017gfo. The numbers are read from the
+# committed MOSFiT check output, robust night interpolation.
 MEASURED_G_MINUS_R_GAP_MAG = 0.4
-G_MINUS_R_GAP_BY_DAY = ((1.5, 0.37), (2.0, 0.47), (3.0, 0.41))
+# +0.3 mag is the same shift with the instrument-to-LSST correction
+# taken off. The difference of the two recalls is that uncertainty.
+INSTRUMENT_TO_LSST_OFFSET_MAG = 0.3
+
+
+def g_minus_r_gap_by_day() -> tuple[tuple[float, float], ...]:
+    """Model-minus-AT2017gfo g−r at 1.5, 2, and 3 days.
+
+    Read from ``checks/mosfit/gr_gap.out`` (the robust night-interpolation
+    block). Rounded half-up to 0.01 mag.
+    """
+    path = Path(__file__).resolve().parents[2] / "checks" / "mosfit" / "gr_gap.out"
+    text = path.read_text(encoding="utf-8")
+    started = False
+    found: dict[float, float] = {}
+    for line in text.splitlines():
+        if line.startswith(" t(d)  data g-r"):
+            started = True
+            continue
+        if not started or not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            break
+        day = float(parts[0])
+        gap = Decimal(parts[-1])
+        rounded = gap.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        found[day] = float(rounded)
+    return tuple((day, found[day]) for day in (1.5, 2.0, 3.0))
 
 
 def recall_with_bluer_color(
@@ -554,6 +593,227 @@ def recall_with_bluer_color(
     )
 
 
+def color_sensitivity(
+    prepared: list[PreparedFake],
+    combo: dict[str, float],
+    *,
+    population: str = "2017-like",
+    day: float = 3.0,
+    status: str = "ready",
+) -> dict:
+    """Recall at +0.4 mag and at +0.3 mag, and the difference.
+
+    The difference is the instrument-to-LSST correction uncertainty.
+    This is not called by the tuning grid.
+    """
+    shared = {"population": population, "day": day, "status": status}
+    at_0_4 = recall_with_bluer_color(
+        prepared, combo, MEASURED_G_MINUS_R_GAP_MAG, **shared
+    )
+    at_0_3 = recall_with_bluer_color(
+        prepared, combo, INSTRUMENT_TO_LSST_OFFSET_MAG, **shared
+    )
+    return {
+        "offset_0_4": at_0_4,
+        "offset_0_3": at_0_3,
+        "difference": at_0_4["recall_judgeable"] - at_0_3["recall_judgeable"],
+    }
+
+
+def format_color_sensitivity(
+    prepared: list[PreparedFake],
+    combo: dict[str, float],
+    **kwargs,
+) -> str:
+    """Both g-r shifts, and their difference, for the report."""
+    result = color_sensitivity(prepared, combo, **kwargs)
+
+    def _percent(value: float) -> str:
+        if value != value:
+            return "no recall"
+        return f"{100.0 * value:.1f}%"
+
+    return (
+        "g-r bluer by +0.4 mag: recall "
+        f"{_percent(result['offset_0_4']['recall_judgeable'])}. "
+        "g-r bluer by +0.3 mag: recall "
+        f"{_percent(result['offset_0_3']['recall_judgeable'])}. "
+        "Difference "
+        f"{_percent(result['difference'])} "
+        "is the instrument to LSST correction uncertainty. "
+        "This hook is not used to pick a cut."
+    )
+
+
+def has_g_minus_r_pair(curve: pd.DataFrame, *, max_gap_days: float = 1.0) -> bool:
+    """True when some g point and some r point are at most ``max_gap_days`` apart."""
+    if curve is None or curve.empty:
+        return False
+    g_times = curve.loc[curve["filter"].astype(str) == "g", "time_days"].to_numpy(
+        dtype=float
+    )
+    r_times = curve.loc[curve["filter"].astype(str) == "r", "time_days"].to_numpy(
+        dtype=float
+    )
+    if len(g_times) == 0 or len(r_times) == 0:
+        return False
+    gaps = np.abs(g_times.reshape(-1, 1) - r_times.reshape(1, -1))
+    return bool(np.any(gaps <= float(max_gap_days) + 1e-9))
+
+
+def same_band_after_r_peak(
+    curve: pd.DataFrame, *, separation_days: float = 0.5
+) -> dict[str, bool]:
+    """Two same-band points at least ``separation_days`` apart after r peak.
+
+    ``any`` is true when some band has such a pair. ``g``, ``r``, and
+    ``i`` are that band alone. No r peak means every flag is false.
+    """
+    flags = {"any": False, "g": False, "r": False, "i": False}
+    if curve is None or curve.empty:
+        return flags
+    from kilonova_hunter.features import peak_time_days
+
+    peak = peak_time_days(curve, "r")
+    if peak is None:
+        return flags
+    after = curve.loc[curve["time_days"].to_numpy(dtype=float) > float(peak)]
+    for band in ("g", "r", "i"):
+        times = np.sort(
+            after.loc[after["filter"].astype(str) == band, "time_days"].to_numpy(
+                dtype=float
+            )
+        )
+        ok = len(times) >= 2 and float(times[-1] - times[0]) + 1e-9 >= separation_days
+        flags[band] = ok
+        flags["any"] = flags["any"] or ok
+    return flags
+
+
+def _curve_up_to_day(curve: pd.DataFrame, day: float, *, redshift: float, kind: str):
+    """Rows at or before ``day``. Realistic day 7 stops at source-frame day 6."""
+    frame = curve
+    if uses_two_component_model(kind) and float(day) >= 7.0:
+        frame = drop_after_two_component_cap(frame, redshift)
+    if frame is None or frame.empty or "time_days" not in frame.columns:
+        return frame
+    times = frame["time_days"].to_numpy(dtype=float)
+    return frame.loc[times <= float(day) + 1e-9].reset_index(drop=True)
+
+
+def informational_tuning_counts(
+    events: pd.DataFrame,
+    curves: pd.DataFrame,
+    *,
+    population: str,
+    day: float,
+) -> dict:
+    """Shares (ii) and (iii) for one tuning population and one day.
+
+    Informational only. Not a cut and not a recall.
+    """
+    by_id: dict[str, pd.DataFrame] = {}
+    if curves is not None and not curves.empty and "object_id" in curves.columns:
+        for object_id, group in curves.groupby("object_id", sort=False):
+            by_id[str(object_id)] = group.drop(columns=["object_id"])
+    n = int(len(events))
+    n_pair = 0
+    n_after = 0
+    by_band = {"g": 0, "r": 0, "i": 0}
+    if n == 0:
+        return {
+            "population": population,
+            "day": day,
+            "n": 0,
+            "g_minus_r_pair": float("nan"),
+            "after_r_peak_any": float("nan"),
+            "after_r_peak_g": float("nan"),
+            "after_r_peak_r": float("nan"),
+            "after_r_peak_i": float("nan"),
+        }
+    for row in events.itertuples(index=False):
+        kind = str(getattr(row, "kind", population))
+        redshift = float(getattr(row, "redshift", 0.0))
+        curve = by_id.get(str(row.object_id), pd.DataFrame())
+        visible = _curve_up_to_day(curve, day, redshift=redshift, kind=kind)
+        if has_g_minus_r_pair(visible):
+            n_pair += 1
+        flags = same_band_after_r_peak(visible)
+        if flags["any"]:
+            n_after += 1
+        for band in ("g", "r", "i"):
+            if flags[band]:
+                by_band[band] += 1
+    return {
+        "population": population,
+        "day": day,
+        "n": n,
+        "g_minus_r_pair": n_pair / n,
+        "after_r_peak_any": n_after / n,
+        "after_r_peak_g": by_band["g"] / n,
+        "after_r_peak_r": by_band["r"] / n,
+        "after_r_peak_i": by_band["i"] / n,
+        "realistic_day7": uses_two_component_model(population) and float(day) >= 7.0,
+    }
+
+
+def format_informational_counts(
+    samples: list,
+    prepared_for_examples: dict,
+    combo: dict[str, float],
+) -> str:
+    """Tuning-only (a), (b), (ii), and (iii). Not used to pick a cut."""
+    lines = [
+        "## Informational counts",
+        "",
+        "These counts are not used to tune or to pick a cut. "
+        "Recall (a) and (b) use the placeholder cuts in config.py. "
+        "(ii) is the share with any g and r points at most 1.0 day apart. "
+        "(iii) is the share with two same-band points at least 0.5 days "
+        "apart after the r-band peak. The band lines are that band alone.",
+        "",
+    ]
+    for sample in samples:
+        if sample.split != "tuning":
+            continue
+        population = sample.population
+        prepared_by_day, _curves = prepared_for_examples[population]
+        for day in JUDGE_DAYS:
+            scored = score_prepared(
+                prepared_by_day[day],
+                combo,
+                population=population,
+                day=day,
+                status=sample.status,
+            )
+            shares = informational_tuning_counts(
+                sample.events,
+                sample.light_curves,
+                population=population,
+                day=day,
+            )
+
+            def _percent(value: float) -> str:
+                if value != value:
+                    return "no number"
+                return f"{100.0 * value:.1f}%"
+
+            lines.append(
+                f"{population} day {day:g}: "
+                f"recall (a) {_percent(scored['recall_judgeable'])}, "
+                f"recall (b) {_percent(scored['recall_candidate'])}. "
+                f"(ii) g-r pair {_percent(shares['g_minus_r_pair'])}. "
+                f"(iii) any band {_percent(shares['after_r_peak_any'])} "
+                f"(g {_percent(shares['after_r_peak_g'])}, "
+                f"r {_percent(shares['after_r_peak_r'])}, "
+                f"i {_percent(shares['after_r_peak_i'])})."
+            )
+            if shares.get("realistic_day7"):
+                lines.append(REALISTIC_DAY7_LABEL)
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def score_prepared(
     prepared: list[PreparedFake],
     combo: dict[str, float],
@@ -581,6 +841,7 @@ def score_prepared(
     judgeable = 0
     judgeable_candidate = 0
     judge_caught = 0
+    candidate_caught = 0
     skipped = 0
     for fake in chosen:
         is_caught, reddening_skipped = caught_by(fake, combo)
@@ -592,6 +853,8 @@ def score_prepared(
             caught += 1
             if fake.judgeable:
                 judge_caught += 1
+            if fake.judgeable_candidate:
+                candidate_caught += 1
             if reddening_skipped:
                 skipped += 1
     untestable = day == 3.0 and status == "untestable" and distance_bin == "all"
@@ -611,9 +874,17 @@ def score_prepared(
         "untestable": untestable,
         "n_reddening_skipped": skipped,
         "n_judgeable_candidate": judgeable_candidate,
+        "n_caught_and_candidate": candidate_caught,
+        "recall_candidate": (
+            float(candidate_caught / judgeable_candidate)
+            if judgeable_candidate
+            else float("nan")
+        ),
         **combo,
         **rates,
     }
+    if untestable:
+        row["recall_candidate"] = float("nan")
     if status == "underpowered" and day == 3.0 and distance_bin == "all" and judgeable:
         # Power uses the measured recall. When the recall was blanked
         # above we would not be in this branch, because underpowered
@@ -1149,6 +1420,13 @@ def summarize_grid(
             "Contamination limit NOT applied. "
             "No cuts were picked from this grid, and the test set was not scored."
         )
+        lines.append(
+            "When Fink flags are counted, the report has two columns: "
+            "flags_per_night (new candidates) and repeat_flags_per_night. "
+            "A repeat counts only on a night with a new alert for that object. "
+            "A night with no new alert counts nothing, not even as a repeat. "
+            "The N = 10 limit uses the new-candidate column only."
+        )
         lines.append("")
     lines.append("## Sample")
     lines.append("")
@@ -1196,8 +1474,8 @@ def summarize_grid(
         )
         if offenders:
             lines.append(
-                "That count is not zero, so it breaks rule 5 and must be "
-                "investigated before the run counts. The filter can flag a "
+                "That count is not zero, so it breaks rule 5 and blocks sign-off. "
+                "The filter can flag a "
                 "fake the frozen judgeable rule rejects, because the color "
                 "rule may interpolate g and r from different nights and the "
                 "fade rule may use two points closer together than 0.5 days. "
@@ -1229,8 +1507,8 @@ def run_tuning_grid(
     The test split is simulated and cached so a later score does not
     redraw it. It is not scored here. No cut is picked. The returned
     run says whether the exact-copy verdict blocks sign-off. The
-    command exits 2 in that case. A caught-but-not-judgeable count
-    does not.
+    command exits 2 in that case, and so does a nonzero
+    caught-but-not-judgeable count.
     """
     from kilonova_hunter.sample import (
         LIKE_KIND,
@@ -1286,6 +1564,19 @@ def run_tuning_grid(
     # stops on (b) must say so, or (b) is only indicative.
     copy_score["stopping_definition"] = "a"
     blocked, copy_status = copy_sign_off(copy_score)
+    reasons: list[str] = []
+    if blocked:
+        reasons.append(
+            f"the exact-copy verdict is {(copy_status or 'blocker').upper()}"
+        )
+    if caught_not_judgeable_blocks(rows):
+        reasons.append(
+            "caught-but-not-judgeable is not zero, which breaks rule 5 "
+            "and blocks sign-off"
+        )
+        blocked = True
+        if copy_status is None:
+            copy_status = "caught-but-not-judgeable"
     destination = Path(output_dir)
     write_grid_csv(rows, destination / "tuning_grid.csv")
     text = summarize_grid(
@@ -1299,16 +1590,37 @@ def run_tuning_grid(
     worst = _worst_not_judgeable(rows, prepared_for_examples)
     if worst:
         text = worst + "\n" + text
+    tuning_samples = [item for item in samples if item.split == "tuning"]
+    text = (
+        text.rstrip()
+        + "\n\n"
+        + format_informational_counts(
+            tuning_samples, prepared_for_examples, placeholder
+        )
+    )
+    like_prepared = prepared_for_examples.get(LIKE_KIND)
+    if like_prepared is not None:
+        text = (
+            text.rstrip()
+            + "\n\n"
+            + format_color_sensitivity(like_prepared[0][3.0], placeholder)
+            + "\n"
+        )
     (destination / "tuning_grid.md").write_text(text, encoding="utf-8")
-    return GridRun(text=text, sign_off_blocker=blocked, copy_status=copy_status)
+    return GridRun(
+        text=text,
+        sign_off_blocker=blocked,
+        copy_status=copy_status,
+        block_reasons=tuple(reasons),
+    )
 
 
 def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
     """List every caught-but-not-judgeable case at days 3, 5, and 7.
 
     Rule 5 requires the count to be 0. A nonzero count breaks rule 5
-    and must be investigated before the run counts. This text does not
-    itself block the run. These fakes are in the catch rate and not in
+    and blocks sign-off, the same as a sanity FAIL. These fakes are in
+    the catch rate and not in
     the judgeable denominator, so that day's recall does not include
     them. The official judgeable rule is not changed.
     """
@@ -1329,7 +1641,7 @@ def _worst_not_judgeable(rows: list[dict], prepared_for_examples: dict) -> str:
         "Those fakes stay in the catch rate and stay out of the judgeable "
         "denominator, so the recall for that day does not include them. "
         "Rule 5 requires this count to be 0. A nonzero count breaks rule 5 "
-        "and must be investigated before the run counts.",
+        "and blocks sign-off.",
         "",
     ]
     for row in sorted(
