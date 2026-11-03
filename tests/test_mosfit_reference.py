@@ -22,7 +22,13 @@ def _pins() -> list[tuple[str, str, str]]:
 def test_reference_files_match_the_upstream_mosfit_hashes() -> None:
     """Each pin is the sha256 of the file at MOSFiT commit 6595248."""
     pins = _pins()
-    assert len(pins) == 11
+    pinned = {name for name, _digest, _url in pins}
+    on_disk = {
+        path.name
+        for path in REFERENCE.iterdir()
+        if path.is_file() and path.name != "SOURCES.txt"
+    }
+    assert on_disk == pinned
     for name, digest, url in pins:
         assert url == (
             "https://raw.githubusercontent.com/guillochon/MOSFiT/6595248/"

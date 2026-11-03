@@ -187,7 +187,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--cuts",
         type=Path,
         default=None,
-        help="JSON file of frozen cuts for --score-test.",
+        help=(
+            'JSON object of frozen cuts: "frozen": true and the four '
+            "cut numbers. --score-test requires it. --fetch-alerts uses "
+            "it only to allow test-slice flag counts; tuning slices are "
+            "still written when it is missing."
+        ),
+    )
+    recall.add_argument(
+        "--rescore-decision",
+        default=None,
+        help=(
+            "Decision id approved by Sage through PM. Required to score "
+            "a test set, or any of its object ids, again."
+        ),
     )
     recall.add_argument(
         "--target",
@@ -350,11 +363,11 @@ def _cuts_are_frozen(path: Path | None) -> tuple[bool, str]:
 
 
 def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) -> None:
-    """Download the ZTF proxy slices and write the frozen JSON.
+    """Download the ZTF proxy slices and write the JSON.
 
-    The command writes nothing until ``cuts`` is a file with
-    ``"frozen": true``. Test-slice flag counts are part of that file,
-    so an unfrozen run exits instead of writing a partial document.
+    Tuning-slice flag counts are always written. Test-slice flag counts
+    are written only when ``cuts`` is frozen. An unfrozen or missing
+    cuts file does not block the tuning slice.
     """
     from datetime import date
 
@@ -364,12 +377,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
         write_slice_document,
     )
 
-    frozen, reason = _cuts_are_frozen(cuts)
-    if not frozen:
-        _fail(
-            f"{reason} --fetch-alerts does not write test-slice flag counts "
-            "until the cuts are frozen. Nothing was written."
-        )
+    frozen, _reason = _cuts_are_frozen(cuts)
     try:
         start_day = date.fromisoformat(start)
         stop_day = date.fromisoformat(stop)
@@ -384,7 +392,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
         alerts,
         start=start_day,
         stop=stop_day,
-        include_test_flag_counts=True,
+        include_test_flag_counts=frozen,
     )
     path = output / "real_alert_slices.json"
     write_slice_document(document, path)
@@ -432,16 +440,29 @@ def _run_score_test(args) -> None:
     if not frozen:
         _fail(reason)
     cuts = json.loads(args.cuts.read_text(encoding="utf-8"))
-    raw_decision = cuts.get("decision_id")
+    # A decision id in the cuts file does not approve a rescore.
+    raw_decision = getattr(args, "rescore_decision", None)
     decision_id = raw_decision.strip() if isinstance(raw_decision, str) else ""
     decision_id = decision_id or None
-    combo = {name: float(cuts[name]) for name in _FROZEN_CUT_KEYS}
+    try:
+        combo = {name: float(cuts[name]) for name in _FROZEN_CUT_KEYS}
+    except (TypeError, ValueError):
+        _fail("Each cut in the cuts file must be a number. Nothing was written.")
     cache = Path(args.cache)
     expected_map = dust_map_label()
     loaded_sets = []
     for population in (LIKE_KIND, REALISTIC):
         folder = cache / population / "test"
         manifest_path, events_path, curves_path = _cache_paths(folder)
+        if (
+            manifest_path.is_file()
+            and curves_path.is_file()
+            and not events_path.is_file()
+        ):
+            _fail(
+                f"The {population} events table is missing ({events_path}). "
+                "Nothing was written."
+            )
         if (
             not manifest_path.is_file()
             or not events_path.is_file()
@@ -465,13 +486,40 @@ def _run_score_test(args) -> None:
                 f"({expected_n!r} vs {len(events)} rows)."
             )
         loaded_sets.append((population, manifest, events, curves))
+    for population, _manifest, events, _curves in loaded_sets:
+        if not _object_ids(events):
+            _fail(
+                f"The {population} events table has no object_id values. "
+                "Nothing was written."
+            )
     # The same fakes are the same test set even when the cache version,
-    # redback version, diffusion fix, or dust map differ. Refuse that
-    # before the cache-validity checks, so the message is the rescore
-    # refusal rather than a provenance mismatch.
+    # redback version, diffusion fix, or dust map differ. An object id
+    # already scored in that population is the same set even when the
+    # hash differs, for example a larger sample_size on the same seed.
+    # This runs before the cache-version check so a rescore is the
+    # Sage-via-PM refusal, not a provenance mismatch.
     identity = test_set_sha256(loaded_sets)
-    if _test_set_already_claimed(identity) and decision_id is None:
-        _refuse_rescore(identity, fresh_cache=True)
+    overlap = _overlap_count(loaded_sets)
+    already = _test_set_already_claimed(identity)
+    if decision_id is None:
+        if already:
+            _refuse_rescore(identity, fresh_cache=True)
+        if overlap:
+            _fail(
+                f"{overlap} object ids in this test set were already scored "
+                f"in the same population. {_RESCORE_NEEDS_A_DECISION}"
+            )
+    elif not already and overlap == 0:
+        _fail(
+            "--rescore-decision was given, but this test set has not been "
+            "scored and none of its object ids overlap a scored population. "
+            "Nothing was written."
+        )
+    elif _decision_already_used(identity, loaded_sets, decision_id):
+        _fail(
+            f"Decision {decision_id} was already used for this test set. "
+            f"{_RESCORE_NEEDS_A_DECISION}"
+        )
     for population, manifest, _events, _curves in loaded_sets:
         reason = cache_refusal_reason(manifest)
         if reason is not None:
@@ -505,22 +553,33 @@ def _run_score_test(args) -> None:
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text + "\n", encoding="utf-8")
+    _record_scored_test_set(
+        identity,
+        combo,
+        loaded_sets,
+        git_sha=_git_sha(),
+        scored_at=_scored_at(),
+        decision_id=decision_id,
+        score_path=destination,
+    )
     print(text)
 
 
 # Ruling 12(21): the score-once key is the test set's identity. Software
 # and dust provenance are recorded on the ledger entry and are not part
 # of the hash. There is no flag that overrides the refusal.
+# sample_size is not part of the identity. A larger draw of the same
+# seed shares object ids and is refused by the overlap check.
 _TEST_SET_IDENTITY_KEYS = (
     "parent_seed",
     "seed",
     "survey",
-    "sample_size",
 )
 _TEST_SET_RECORDED_KEYS = (
     "cache_version",
     "redback_version",
     "diffusion_fix",
+    "dust_mode",
     "dust_map",
 )
 _RESCORE_NEEDS_A_DECISION = (
@@ -553,25 +612,101 @@ def test_set_claim_dir() -> Path:
     return test_set_scored_path().parent / "test_set_claims"
 
 
+def _object_ids(events) -> list[str]:
+    """Sorted object ids. Blank and missing values are not ids."""
+    if events is None or getattr(events, "empty", True):
+        return []
+    if "object_id" not in events.columns:
+        return []
+    found: list[str] = []
+    for item in events["object_id"].tolist():
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text or text.lower() == "nan":
+            continue
+        found.append(text)
+    return sorted(set(found))
+
+
 def test_set_sha256(loaded_sets: list) -> str:
     """Hash of seeds, the population spec, and sorted fake ids.
 
-    ``cache_version``, ``redback_version``, ``diffusion_fix``, and the
-    dust map are not in this hash. The cache path is not in it either.
+    ``sample_size``, ``cache_version``, ``redback_version``,
+    ``diffusion_fix``, and the dust map are not in this hash. The cache
+    path is not in it either. An empty id list is not hashed.
     """
     import hashlib
     import json
 
     parts = []
     for population, manifest, events, _curves in loaded_sets:
-        if events is not None and "object_id" in events.columns:
-            object_ids = sorted(str(item) for item in events["object_id"].tolist())
-        else:
-            object_ids = []
+        object_ids = _object_ids(events)
+        if not object_ids:
+            raise ValueError(f"The {population} events table has no object_id values.")
         spec = {key: manifest.get(key) for key in _TEST_SET_IDENTITY_KEYS}
         parts.append({"population": population, "spec": spec, "object_ids": object_ids})
     raw = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _population_spec(manifest: dict) -> dict:
+    """Identity of the population draw, without ``sample_size``."""
+    return {key: manifest.get(key) for key in _TEST_SET_IDENTITY_KEYS}
+
+
+def _ledger_payload() -> dict:
+    import json
+
+    path = test_set_scored_path()
+    if not path.is_file():
+        return {"sets": {}}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload.setdefault("sets", {})
+    return payload
+
+
+def _previously_scored_ids() -> dict[str, set[str]]:
+    """Object ids already scored, grouped by population name."""
+    scored: dict[str, set[str]] = {}
+    for entries in _ledger_payload().get("sets", {}).values():
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            for population, ids in (entry.get("object_ids") or {}).items():
+                scored.setdefault(str(population), set()).update(
+                    str(item) for item in ids
+                )
+    return scored
+
+
+def _overlap_count(loaded_sets: list) -> int:
+    """How many new object ids were already scored in that population."""
+    previous = _previously_scored_ids()
+    count = 0
+    for population, _manifest, events, _curves in loaded_sets:
+        fresh = set(_object_ids(events))
+        count += len(fresh & previous.get(population, set()))
+    return count
+
+
+def _decision_already_used(test_hash: str, loaded_sets: list, decision_id: str) -> bool:
+    """True when this decision id already approved this set or these ids."""
+    for hash_key, entries in _ledger_payload().get("sets", {}).items():
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            if entry.get("decision_id") != decision_id:
+                continue
+            if hash_key == test_hash:
+                return True
+            recorded = entry.get("object_ids") or {}
+            for population, _manifest, events, _curves in loaded_sets:
+                fresh = set(_object_ids(events))
+                prior = {str(item) for item in recorded.get(population, [])}
+                if fresh & prior:
+                    return True
+    return False
 
 
 def _provenance(loaded_sets: list) -> dict:
@@ -641,6 +776,17 @@ def _ledger_hashes() -> set[str]:
     return set(payload.get("sets", {}))
 
 
+def _write_ledger(path: Path, payload: dict) -> None:
+    """Replace the ledger atomically. The temp file sits in the same directory."""
+    import json
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def _record_scored_test_set(
     test_hash: str,
     combo: dict[str, float],
@@ -649,24 +795,39 @@ def _record_scored_test_set(
     git_sha: str,
     scored_at: str,
     decision_id: str | None = None,
+    score_path: Path,
 ) -> None:
-    """Append one scoring entry. A later entry does not replace the first."""
+    """Append one scoring entry after the score file exists.
+
+    A later entry does not replace the first. The entry names the score
+    file and its sha256.
+    """
     import hashlib
     import json
 
     path = test_set_scored_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file():
         payload = json.loads(path.read_text(encoding="utf-8"))
     else:
         payload = {"sets": {}}
     cuts = json.dumps(combo, sort_keys=True, separators=(",", ":"))
+    score_bytes = score_path.read_bytes()
     entry = {
         "cuts_sha256": hashlib.sha256(cuts.encode("utf-8")).hexdigest(),
         "cuts": combo,
         "provenance": _provenance(loaded_sets),
+        "population_spec": {
+            population: _population_spec(manifest)
+            for population, manifest, _events, _curves in loaded_sets
+        },
+        "object_ids": {
+            population: _object_ids(events)
+            for population, _manifest, events, _curves in loaded_sets
+        },
         "git_sha": git_sha,
         "scored_at": scored_at,
+        "score_path": str(score_path),
+        "score_sha256": hashlib.sha256(score_bytes).hexdigest(),
     }
     if decision_id:
         entry["decision_id"] = decision_id
@@ -679,7 +840,7 @@ def _record_scored_test_set(
         entries = list(current)
     entries.append(entry)
     payload["sets"][test_hash] = entries
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    _write_ledger(path, payload)
 
 
 def _claim_score_once_marker(
@@ -732,14 +893,6 @@ def _claim_score_once_marker(
             os.write(descriptor, body.encode("utf-8"))
         finally:
             os.close(descriptor)
-    _record_scored_test_set(
-        test_hash,
-        combo,
-        loaded_sets,
-        git_sha=git_sha,
-        scored_at=scored_at,
-        decision_id=decision_id,
-    )
 
 
 def _run_grid(args) -> None:

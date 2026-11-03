@@ -31,6 +31,9 @@ def test_printed_precision_rejects_a_hundredth_at_three_decimals() -> None:
     """One unit in the last printed digit of 20.625 is 0.001, not 0.02."""
     compare = _compare()
     assert compare("mag 20.625\n", "mag 20.625\n") == []
+    # Exactly one unit in the last printed digit is still the same value.
+    assert compare("mag 20.626\n", "mag 20.625\n") == []
+    assert compare("mag 20.627\n", "mag 20.625\n")
     assert compare("mag 20.635\n", "mag 20.625\n")
 
 

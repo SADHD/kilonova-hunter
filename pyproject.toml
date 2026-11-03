@@ -52,7 +52,9 @@ line-length = 88
 target-version = "py312"
 src = ["src", "tests", "notebooks"]
 # reference/ is the MOSFiT commit 6595248 text. Ruff must not reformat it.
+# force-exclude keeps that true even when the path is passed on the command line.
 extend-exclude = ["checks/mosfit/reference"]
+force-exclude = true
 
 [tool.ruff.lint]
 # E and F catch real mistakes. I sorts imports. UP modernizes syntax.

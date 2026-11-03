@@ -12,12 +12,13 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = ROOT / "checks" / "mosfit"
 # Used when the reference token has no digits after the decimal point.
-_ABSOLUTE_FALLBACK = 1e-3
+_ABSOLUTE_FALLBACK = Decimal("0.001")
 _NUMBER = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
 _EXPECTED_SCRIPTS = (
     "band_sidebyside.py",
@@ -32,8 +33,8 @@ _EXPECTED_SCRIPTS = (
 )
 
 
-def _printed_unit(reference: str) -> float:
-    """One unit in the last printed decimal, or 1e-3 when there is none."""
+def _printed_unit(reference: str) -> Decimal:
+    """One unit in the last printed decimal, or 0.001 when there is none."""
     token = reference.strip()
     if token[:1] in "+-":
         token = token[1:]
@@ -42,15 +43,17 @@ def _printed_unit(reference: str) -> float:
     if "." in mantissa:
         fraction = mantissa.split(".", 1)[1]
         if fraction:
-            return 10 ** (-len(fraction) + power)
+            return Decimal(10) ** (-len(fraction) + power)
     return _ABSOLUTE_FALLBACK
 
 
 def _same_number(found: str, expected: str) -> bool:
     if _integer(found) and _integer(expected):
         return found.lstrip("+") == expected.lstrip("+")
-    left = float(found)
-    right = float(expected)
+    # Decimal keeps the printed token exact. float(20.626) - float(20.625)
+    # is not exactly one thousandth, so the one-unit edge would be wrong.
+    left = Decimal(found)
+    right = Decimal(expected)
     return abs(left - right) <= _printed_unit(expected)
 
 
