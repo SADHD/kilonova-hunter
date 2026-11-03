@@ -57,6 +57,11 @@ def test_reports_say_tns_is_not_yet_implemented(tmp_path) -> None:
     assert TNS_STATUS_LINE in summary
     assert TNS_STATUS_LINE in score
     assert TNS_STATUS_LINE in report
+    assert "Judgeable (a)" in summary
+    assert "Judgeable (b)" in summary
+    assert "Sage" in summary
+    assert "Judgeable (a)" in score
+    assert "Judgeable (a)" in report
     with pytest.raises(NotImplementedError):
         lookup_classifications(["AT2017gfo"])
 
@@ -252,6 +257,34 @@ def test_far_distance_bin_ends_at_300_and_includes_300() -> None:
     assert near["n_total"] == 0
     assert middle["n_total"] == 1
     assert far["n_total"] == 1
+    assert far["n_judgeable"] == 1
+    assert far["n_judgeable_candidate"] == 0
+
+
+def test_grid_row_shows_both_judgeable_definitions() -> None:
+    """(a) stays the recall count. (b) is reported beside it and is not official."""
+    combo = {
+        "redder_than_g_minus_r": 0.0,
+        "min_g_minus_r_rise": 0.1,
+        "reddening_window_days": 2.0,
+        "min_color_separation_days": 0.5,
+    }
+    official = _one_prepared("official-only", 40.0)
+    both = _one_prepared("both-definitions", 50.0)
+    both.judgeable_candidate = True
+    row = score_prepared(
+        [official, both],
+        combo,
+        population="2017-like",
+        day=3.0,
+        status="ready",
+    )
+    assert row["n_judgeable"] == 2
+    assert row["n_judgeable_candidate"] == 1
+    text = _combo_sentence(row)
+    assert "Judgeable (a, official): 2" in text
+    assert "needs Sage's approval" in text
+    assert "Judgeable (b, candidate, needs Sage's approval): 1" in text
 
 
 def test_caught_but_not_judgeable_check_includes_day_7() -> None:
