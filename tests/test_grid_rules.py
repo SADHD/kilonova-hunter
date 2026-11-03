@@ -683,11 +683,20 @@ def test_color_pair_and_post_peak_pair_are_informational() -> None:
 
 
 def test_a_caught_but_not_judgeable_count_blocks_sign_off() -> None:
-    """Rule 5 is a sign-off block, the same as a sanity FAIL."""
+    """Rule 5 is a sign-off block, the same as a sanity FAIL.
+
+    Ruling 12(21) keeps the check on every cell. A clean chosen cut
+    does not excuse a breach in another cell.
+    """
     from kilonova_hunter.grid import caught_not_judgeable_blocks
 
     assert caught_not_judgeable_blocks([{"n_caught_not_judgeable": 0}]) is False
     assert caught_not_judgeable_blocks([{"n_caught_not_judgeable": 2}]) is True
+    cells = [
+        {"chosen": True, "n_caught_not_judgeable": 0},
+        {"chosen": False, "n_caught_not_judgeable": 1},
+    ]
+    assert caught_not_judgeable_blocks(cells) is True
 
 
 def test_exact_copy_loop_stops_at_the_4000_cap_untestable(
