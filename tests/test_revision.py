@@ -104,6 +104,9 @@ def test_grid_matches_direct_and_preserves_night_metadata():
 
 
 def test_new_copy_seed_changes_draw_and_is_recorded(tmp_path, monkeypatch):
+    # Drawing copies uses scipy through astropy's cosmology integration.
+    pytest.importorskip("scipy")
+
     import kilonova_hunter.sample as sample
     from kilonova_hunter.sky import DustSource
 
