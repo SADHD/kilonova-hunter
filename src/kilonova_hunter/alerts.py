@@ -189,18 +189,11 @@ def label_night_slices(
 
 
 def tuning_only_alerts(alerts: pd.DataFrame) -> pd.DataFrame:
-    """Tuning-night rows only.
-
-    A ``night_slice`` of ``test`` is removed. Without that column, the
-    committed frozen lists supply the labels. Either way the
-    returned rows are the tuning slice of the table that was passed in.
-    """
+    """Validate every row against the committed frozen tuning nights."""
     if alerts.empty:
         return alerts.copy()
-    if NIGHT_SLICE_COLUMN in alerts.columns:
-        labels = alerts[NIGHT_SLICE_COLUMN].astype(str)
-        return alerts.loc[labels == "tuning"].reset_index(drop=True)
-    return tuning_only_alerts(label_night_slices(alerts))
+    labeled = label_night_slices(alerts)
+    return labeled.loc[labeled[NIGHT_SLICE_COLUMN] == "tuning"].reset_index(drop=True)
 
 
 def read_tuning_alerts(directory: Path | str) -> pd.DataFrame:

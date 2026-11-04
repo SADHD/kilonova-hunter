@@ -195,3 +195,65 @@ def test_empty_detection_history_counts_fade_skip_only_in_variant():
         assert fake.fade_skipped is variant
         assert fake.color_value is None
         assert fake.judgeable is False
+
+
+def test_day_d_is_inclusive_for_color():
+    frame = curve([(2.98, "g", 21, 0.1), (3.0, "r", 20, 0.1)])
+    assert latest_same_night_color(frame, day=3.0).g_minus_r == 1
+    assert latest_same_night_color(frame, day=2.999).g_minus_r is None
+
+
+def test_copy_defaults_are_the_approved_fresh_seed_day_and_target():
+    import inspect
+
+    from kilonova_hunter import grid, sample
+
+    # Inspect the actual call defaults, not explicit test-only arguments.
+    assert (
+        inspect.signature(sample.simulate_exact_copies).parameters["seed"].default
+        == 2026110401
+    )
+    assert (
+        inspect.signature(grid.run_tuning_grid).parameters["copy_seed"].default
+        == 2026110401
+    )
+    assert inspect.signature(grid.score_exact_copies).parameters["day"].default == 3.0
+    assert (
+        inspect.signature(sample.simulate_exact_copies)
+        .parameters["target_judgeable"]
+        .default
+        == 50
+    )
+    assert (
+        inspect.signature(grid.sanity_copy_verdict).parameters["target"].default == 50
+    )
+    assert grid.sanity_copy_verdict(49, 49)["status"] == "untestable"
+
+
+def test_tuning_reader_rejects_forged_labels(tmp_path):
+    import json
+
+    from kilonova_hunter.alerts import (
+        FROZEN_SPLIT_PATH,
+        TUNING_ALERTS_FILENAME,
+        read_tuning_alerts,
+    )
+
+    frozen = json.loads(FROZEN_SPLIT_PATH.read_text())
+    tuning = frozen["tuning"]["nights"][0]
+    test = frozen["test"]["nights"][0]
+    pd.DataFrame({"night": [tuning, test], "night_slice": ["tuning", "tuning"]}).to_csv(
+        tmp_path / TUNING_ALERTS_FILENAME, index=False
+    )
+    assert read_tuning_alerts(tmp_path).night.tolist() == [tuning]
+
+
+def test_missing_pair_counter_does_not_change_verdict():
+    from kilonova_hunter.grid import PreparedFake, grid_combinations, score_prepared
+
+    fake = PreparedFake("no-pair", 40, False, False, True, None, {(2.0, 0.5): None})
+    row = score_prepared(
+        [fake], grid_combinations()[0], population="2017-like", day=3, status="ready"
+    )
+    assert row["n_no_same_night_pair"] == 1
+    assert row["n_caught"] == 0

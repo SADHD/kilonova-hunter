@@ -60,10 +60,10 @@ VELOCITY_MAX_C = 0.40
 EXACT_KIND = "at2017gfo-exact"
 LIKE_KIND = "2017-like"
 
-# The 100 exact copies use this seed, not the tuning or test seed.
-EXACT_SEED = 20170817
+# Fresh copy seed approved in Decision 12(22), separate from population seeds.
+EXACT_SEED = 2026110401
 EXACT_COUNT = 100
-# Decision Log 12(16), proposed, pending Sage. The report uses these.
+# Decision Log 12(16), approved by Sage Nov 4.
 # Draw batches until this many copies are judgeable under definition (a),
 # and stop at the cap even if that count is not reached.
 EXACT_TARGET_JUDGEABLE = 50

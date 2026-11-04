@@ -354,7 +354,7 @@ exposure time, then g time, then r time (and color to break exact duplicates).
 Rubin fakes use floor(MJD − 0.5); ZTF uses its frozen Palomar-noon convention.
 Reddening retains its separate interpolated color samples. This implements
 option (ii), approved by Sage, and reverses Decision 12(3). Judgeability stays
-at definition (a); definition (b) is dropped from grid reports.
+at the frozen filter-independent section 1 definition.
 
 `recall --grid --tuning-only --new-fade` enables the preregistered candidate
 fade measurement. It is off by default. A band is measurable only with two

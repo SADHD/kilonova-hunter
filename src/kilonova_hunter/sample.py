@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
+from kilonova_hunter.judge import JUDGE_DAYS, is_judgeable
 from kilonova_hunter.model_grid import (
     drop_after_two_component_cap,
     uses_two_component_model,
@@ -487,12 +487,6 @@ def _event_record(event, *, error_reason: str | None, curve: pd.DataFrame) -> di
             False if failed else is_judgeable(curve, day, merger_mjd=event.merger_mjd)
         )
         row[f"judgeable_day{int(day)}"] = int(flag)
-        candidate = (
-            False
-            if failed
-            else is_candidate_judgeable(curve, day, merger_mjd=event.merger_mjd)
-        )
-        row[f"judgeable_candidate_day{int(day)}"] = int(candidate)
     return row
 
 
@@ -821,20 +815,10 @@ def simulate_population(
 
 
 def _judgeable_stop_column(definition: str) -> str:
-    """Which day-3 flag stops the exact-copy loop.
-
-    ``a`` is the official ``is_judgeable`` rule. ``b`` is the candidate
-    rule. The choice is part of the cache identity, so a cache built
-    for one definition is not reused for the other.
-    """
-    if definition == "a":
-        return "judgeable_day3"
-    if definition == "b":
-        return "judgeable_candidate_day3"
-    raise ValueError(
-        "judgeable_definition must be 'a' (official) or 'b' (candidate), "
-        f"got {definition!r}."
-    )
+    """Only the frozen, filter-independent definition is supported."""
+    if definition != "a":
+        raise ValueError("judgeable_definition must be 'a'.")
+    return "judgeable_day3"
 
 
 def simulate_exact_copies(
@@ -852,15 +836,9 @@ def simulate_exact_copies(
 ) -> SampleResult:
     """Simulate exact AT2017gfo copies. They are not a recall set.
 
-    The default follows Decision Log 12(16), which is proposed and
-    still waiting on Sage. Batches are drawn at 40 Mpc, with random
-    cadence dates and random positions, until at least
-    ``target_judgeable`` copies are judgeable at day 3, or ``cap``
-    copies have been drawn. ``judgeable_definition`` ``a`` uses the
-    official rule. ``b`` uses the candidate rule. Hitting the cap with
-    fewer than the target leaves the status ``untestable``. Pass
-    ``count`` to draw a fixed number instead. That fixed draw is for
-    tests. The report uses the default, definition (a), cap 4000.
+    Decision 12(16), approved by Sage Nov 4: draw random cadence dates
+    and positions at 40 Mpc until 50 are judgeable at day 3, cap 4000.
+    Definition (a) is the only supported rule. A fixed ``count`` is for tests.
     """
     stop_column = _judgeable_stop_column(judgeable_definition)
     sky = survey if survey is not None else evaluation_survey()
