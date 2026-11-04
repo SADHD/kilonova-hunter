@@ -220,7 +220,9 @@ Fink's public API (class `Unknown`) and writes
 `results/real_alert_slices_fetched.json` and
 `results/ztf_proxy_alerts_tuning.csv`. It labels rows using the committed
 night lists in `results/real_alert_slices.json`, which it never overwrites.
-Missing nights do not change the split; unknown nights are refused.
+Missing tuning nights are reported and do not change the split. Unknown-night
+rows are dropped; their count and nights are reported to stderr and in the fetched
+summary JSON.
 Until cuts are frozen, no test-night rows or totals are written or printed.
 A ZTF night is `floor(MJD - 20/24)`,
 which changes at 20:00 UTC, local noon at Palomar in Pacific Standard
