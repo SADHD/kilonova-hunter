@@ -67,6 +67,8 @@ class Thresholds:
     min_color_separation_days: float
     fade_bands: tuple[str, ...]
     max_color_interpolation_gap_days: float = 1.0
+    # Decision 12(22): candidate measurement, default OFF.
+    fade_requires_two_after_peak: bool = False
 
     def __post_init__(self) -> None:
         """Reject settings that cannot describe a fade, a color, or a rise."""

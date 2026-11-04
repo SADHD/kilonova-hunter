@@ -58,8 +58,8 @@ def test_reports_say_tns_is_not_yet_implemented(tmp_path) -> None:
     assert TNS_STATUS_LINE in score
     assert TNS_STATUS_LINE in report
     assert "Judgeable (a)" in summary
-    assert "Judgeable (b)" in summary
-    assert "It does not replace (a)." in summary
+    assert "Judgeable (b)" not in summary
+    assert "Decision 12(22)" in summary
     assert "Judgeable (a)" in score
     assert "Judgeable (a)" in report
     with pytest.raises(NotImplementedError):
@@ -283,8 +283,8 @@ def test_grid_row_shows_both_judgeable_definitions() -> None:
     assert row["n_judgeable_candidate"] == 1
     text = _combo_sentence(row)
     assert "Judgeable (a, official): 2" in text
-    assert "not adopted" in text
-    assert "Judgeable (b, candidate, not adopted): 1" in text
+    assert "not adopted" not in text
+    assert "Judgeable (b, candidate" not in text
 
 
 def test_caught_but_not_judgeable_check_includes_day_7() -> None:
@@ -456,7 +456,7 @@ def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     assert "UNTESTABLE" in text
     assert "v1 not Done" in text
     assert "blocks sign-off" in text
-    assert "Indicative, not a 12(16) result." in text
+    assert "Indicative, not a 12(16) result." not in text
     assert "nan" not in text.lower()
     stopped_on_b = dict(result)
     stopped_on_b["stopping_definition"] = "b"
@@ -855,10 +855,10 @@ def test_color_sensitivity_scope_covers_both_definitions() -> None:
                 needle = f"{population} day {day:g}, g-r bluer by +{shift:.1f} mag:"
                 assert needle in report
     bluer = "2017-like day 3, g-r bluer by +"
-    assert f"{bluer}0.4 mag: recall (a) 0.0%, recall (b) no recall." in report
-    assert f"{bluer}0.3 mag: recall (a) 100.0%, recall (b) no recall." in report
+    assert f"{bluer}0.4 mag: recall (a) 0.0%." in report
+    assert f"{bluer}0.3 mag: recall (a) 100.0%." in report
     assert "recall (a)" in report
-    assert "recall (b)" in report
+    assert "recall (b)" not in report
     assert REALISTIC_DAY7_LABEL in report
     assert report.count(REALISTIC_DAY7_LABEL) == 1
 

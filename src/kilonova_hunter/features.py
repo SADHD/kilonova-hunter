@@ -137,6 +137,49 @@ class ColorRise:
     weighting_note: str = ""
 
 
+def latest_same_night_color(
+    light_curve: pd.DataFrame, *, day: float = float("inf")
+) -> ColorMeasurement:
+    """Latest pair, ordered by (later time, g time, r time), as in option checks.
+
+    Decision: option (ii), Nov 4 2026; reverses 12(3).
+    Explicit night labels support ZTF; otherwise attrs supply the Rubin merger MJD.
+    Without absolute metadata, time zero is treated as MJD zero (toy curves).
+    Reddening keeps its existing independent interpolated color samples.
+    """
+    from kilonova_hunter.judge import signal_to_noise
+
+    _require_light_curve(light_curve)
+    points = light_curve.loc[light_curve.time_days <= day].copy()
+    if "magnitude_error" in points:
+        points = points.loc[
+            signal_to_noise(points.magnitude_error.to_numpy()) + 1e-9 >= 5
+        ]
+    points = points.dropna(subset=["time_days", "magnitude"])
+    if "night" not in points:
+        points["night"] = np.floor(
+            float(light_curve.attrs.get("merger_mjd", 0.0)) + points.time_days - 0.5
+        )
+    pairs = []
+    for g in points.loc[points["filter"] == "g"].itertuples():
+        for r in points.loc[points["filter"] == "r"].itertuples():
+            if g.night == r.night:
+                pairs.append(
+                    (
+                        max(g.time_days, r.time_days),
+                        g.time_days,
+                        r.time_days,
+                        g.magnitude - r.magnitude,
+                    )
+                )
+    if not pairs:
+        return ColorMeasurement(
+            None, day, "Not enough data: no same-night g+r detection pair."
+        )
+    when, _, _, value = max(pairs)
+    return ColorMeasurement(float(value), float(when), "Latest same-night g+r pair.")
+
+
 def fade_rates(
     light_curve: pd.DataFrame,
     thresholds: Thresholds | None = None,
@@ -172,6 +215,7 @@ def fade_rates(
             band=band,
             min_points=settings.min_points_per_band,
             window_days=settings.fade_window_days,
+            strict_after_peak=settings.fade_requires_two_after_peak,
         )
     return rates
 
@@ -521,6 +565,7 @@ def _fade_rate_for_one_band(
     band: str,
     min_points: int,
     window_days: float,
+    strict_after_peak: bool = False,
 ) -> BandFade:
     """Fit one band's fade, using only the points after its own peak.
 
@@ -549,6 +594,16 @@ def _fade_rate_for_one_band(
         (usable_points["time_days"] >= peak_time - _SAME_VISIT_DAYS)
         & (usable_points["time_days"] <= window_end + _SAME_VISIT_DAYS)
     ]
+    # Decision 12(22): change measurability only, preserving the original fit.
+    if strict_after_peak:
+        after_peak = in_window.time_days > peak_time + _SAME_VISIT_DAYS
+        if int(after_peak.sum()) < 2:
+            return BandFade(
+                band,
+                None,
+                "Fewer than two detections strictly after the brightest point "
+                "within the fade window.",
+            )
     times = in_window["time_days"].to_numpy(dtype=float)
     magnitudes = in_window["magnitude"].to_numpy(dtype=float)
 

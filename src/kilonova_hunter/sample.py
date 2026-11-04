@@ -839,6 +839,7 @@ def _judgeable_stop_column(definition: str) -> str:
 
 def simulate_exact_copies(
     *,
+    seed: int = EXACT_SEED,
     survey: SurveySettings | None = None,
     dust: DustSource | None = None,
     cache_dir: Path | str = Path("data") / "recall" / "cache",
@@ -866,14 +867,18 @@ def simulate_exact_copies(
     dust_source = dust if dust is not None else open_dust_source()
     folder = Path(cache_dir) / EXACT_KIND / "copies"
     loaded = _read_cache(folder)
-    if loaded is not None and _exact_cache_matches(
-        loaded[0],
-        dust=dust_source,
-        survey=sky,
-        count=count,
-        target_judgeable=target_judgeable,
-        cap=cap,
-        judgeable_definition=judgeable_definition,
+    if (
+        loaded is not None
+        and loaded[0].get("seed") == seed
+        and _exact_cache_matches(
+            loaded[0],
+            dust=dust_source,
+            survey=sky,
+            count=count,
+            target_judgeable=target_judgeable,
+            cap=cap,
+            judgeable_definition=judgeable_definition,
+        )
     ):
         manifest, events, curves = loaded
         return _result_from_frames(
@@ -897,6 +902,7 @@ def simulate_exact_copies(
         this_batch = min(this_batch, goal - drawn)
         events_list, seeds = draw_exact_copies(
             dust_source,
+            seed=seed,
             count=this_batch,
             start_index=drawn,
             batch_index=batch_index,
@@ -937,7 +943,7 @@ def simulate_exact_copies(
         "survey": _survey_dict(sky),
         "n_simulated": len(events),
         "n_judgeable_day3": n_judge,
-        "seed": EXACT_SEED,
+        "seed": seed,
         "target_judgeable": None if count is not None else target_judgeable,
         "cap": None if count is not None else cap,
         "fixed_count": count,

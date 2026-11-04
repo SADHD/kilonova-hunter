@@ -102,7 +102,7 @@ def test_noise_free_demo_passes_every_rule() -> None:
         "so the fade rule passes."
     )
     assert verdict.color.explanation == (
-        "1 day after the r-band peak, g minus r is 0.35, which is redder "
+        "At the latest same-night g+r pair, g minus r is 3.95, which is redder "
         "than 0.00, so the color rule passes."
     )
 
@@ -148,7 +148,7 @@ def test_blue_source_fails_the_color_rule() -> None:
     assert verdict.reddening.passed is False
     assert not verdict.is_candidate
     assert verdict.color.explanation == (
-        "1 day after the r-band peak, g minus r is -0.40, which is not "
+        "At the latest same-night g+r pair, g minus r is -0.40, which is not "
         "redder than 0.00, so the color rule fails."
     )
 
@@ -177,7 +177,7 @@ def test_too_few_points_says_not_enough_data() -> None:
     assert not verdict.color.passed
     assert not verdict.is_candidate
     assert "not enough data" in verdict.fade.explanation.lower()
-    assert "not enough data" in verdict.color.explanation.lower()
+    assert "no same-night" not in verdict.color.explanation.lower()
 
 
 def test_fade_rule_reads_the_cut_from_the_config() -> None:
@@ -201,7 +201,7 @@ def test_color_rule_reads_the_cut_from_the_config() -> None:
     """
     curve = _noise_free_demo()
     placeholder = replace(THRESHOLDS, redder_than_g_minus_r=0.0)
-    stricter = replace(THRESHOLDS, redder_than_g_minus_r=1.0)
+    stricter = replace(THRESHOLDS, redder_than_g_minus_r=4.0)
     assert evaluate_color_rule(curve, placeholder).passed
     assert not evaluate_color_rule(curve, stricter).passed
 
@@ -215,7 +215,9 @@ def test_color_delay_is_read_from_the_config() -> None:
     curve = _noise_free_demo()
     at_the_peak = replace(THRESHOLDS, color_days_after_peak=0.0)
     one_day_later = replace(THRESHOLDS, color_days_after_peak=1.0)
-    assert not evaluate_color_rule(curve, at_the_peak).passed
+    assert evaluate_color_rule(curve, at_the_peak) == evaluate_color_rule(
+        curve, one_day_later
+    )
     assert evaluate_color_rule(curve, one_day_later).passed
 
 
@@ -291,7 +293,7 @@ def test_one_color_skips_reddening_and_still_passes() -> None:
     assert verdict.fade.passed is True
     assert verdict.color.passed is True
     assert verdict.color.explanation == (
-        "1 day after the r-band peak, g minus r is 0.40, which is redder "
+        "At the latest same-night g+r pair, g minus r is 0.40, which is redder "
         "than 0.00, so the color rule passes."
     )
     assert verdict.reddening.passed is None

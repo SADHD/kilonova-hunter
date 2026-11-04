@@ -393,6 +393,7 @@ def light_curve_from_alerts(alerts: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "time_days": kept["mjd"].to_numpy(dtype=float) - start,
+            "night": ztf_night(kept["mjd"].to_numpy(dtype=float)),
             "filter": [FID_TO_BAND[int(fid)] for fid in kept["i:fid"].tolist()],
             "magnitude": kept["i:magpsf"].to_numpy(dtype=float),
             "magnitude_error": kept["i:sigmapsf"].to_numpy(dtype=float),
