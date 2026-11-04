@@ -1,13 +1,9 @@
-"""Decision 12(22): operational pairing and optional fade measurement."""
-
-from dataclasses import replace
+"""Decision 12(22): operational pairing and approved copy defaults."""
 
 import pandas as pd
 import pytest
 
-from kilonova_hunter.config import THRESHOLDS
 from kilonova_hunter.features import latest_same_night_color
-from kilonova_hunter.filter import evaluate_fade_rule
 
 
 def curve(rows):
@@ -71,36 +67,7 @@ def test_unreadable(rows):
     assert latest_same_night_color(curve(rows)).g_minus_r is None
 
 
-def test_default_fade_is_exactly_legacy_and_variant_skips():
-    frame = curve([(0, "g", 18, 0.1), (2, "g", 18.2, 0.1)])
-    legacy = evaluate_fade_rule(frame)
-    assert legacy == evaluate_fade_rule(
-        frame, replace(THRESHOLDS, fade_requires_two_after_peak=False)
-    )
-    assert legacy.passed is False
-    assert (
-        evaluate_fade_rule(
-            frame, replace(THRESHOLDS, fade_requires_two_after_peak=True)
-        ).passed
-        is None
-    )
-
-
-def test_variant_fits_only_two_strictly_after_peak_inside_window():
-    settings = replace(THRESHOLDS, fade_requires_two_after_peak=True)
-    frame = curve(
-        [(0, "g", 18, 0.1), (1, "g", 18.1, 0.1), (2, "g", 18.2, 0.1), (4, "g", 30, 0.1)]
-    )
-    assert evaluate_fade_rule(frame).passed is False
-    assert evaluate_fade_rule(frame, settings) == evaluate_fade_rule(frame)
-    frame.loc[2, "magnitude"] = 20
-    assert evaluate_fade_rule(frame, settings).passed is True
-    frame["time_days"] = frame.time_days.astype(float)
-    frame.loc[2, "time_days"] = 3.1
-    assert evaluate_fade_rule(frame, settings).passed is None
-
-
-def test_grid_variant_matches_direct_and_preserves_night_metadata():
+def test_grid_matches_direct_and_preserves_night_metadata():
     from kilonova_hunter.filter import is_kilonova_candidate
     from kilonova_hunter.grid import (
         caught_by,
@@ -129,15 +96,11 @@ def test_grid_variant_matches_direct_and_preserves_night_metadata():
         ]
     )
     curves = frame.assign(object_id="one")
-    for new_fade in (False, True):
-        prepared = prepare_fakes(events, curves, 3, new_fade=new_fade)[0]
-        for combo in grid_combinations():
-            settings = replace(
-                thresholds_for(combo), fade_requires_two_after_peak=new_fade
-            )
-            direct = is_kilonova_candidate(frame, settings)
-            assert caught_by(prepared, combo)[0] == direct.is_candidate
-            assert prepared.fade_skipped == (direct.fade.passed is None)
+    prepared = prepare_fakes(events, curves, 3)[0]
+    for combo in grid_combinations():
+        direct = is_kilonova_candidate(frame, thresholds_for(combo))
+        assert caught_by(prepared, combo)[0] == direct.is_candidate
+        assert prepared.fade_skipped == (direct.fade.passed is None)
 
 
 def test_new_copy_seed_changes_draw_and_is_recorded(tmp_path, monkeypatch):
@@ -171,30 +134,6 @@ def test_new_copy_seed_changes_draw_and_is_recorded(tmp_path, monkeypatch):
             json.loads((result.cache_dir / "manifest.json").read_text())["seed"] == seed
         )
     assert seen == [2026110401, 2026110402]
-
-
-def test_empty_detection_history_counts_fade_skip_only_in_variant():
-    from kilonova_hunter.grid import prepare_fakes
-
-    events = pd.DataFrame(
-        [
-            dict(
-                object_id="empty",
-                kind="2017-like",
-                distance_mpc=40,
-                model_failed=False,
-                merger_mjd=60000.0,
-            )
-        ]
-    )
-    curves = pd.DataFrame(
-        columns=["object_id", "time_days", "filter", "magnitude", "magnitude_error"]
-    )
-    for variant in (False, True):
-        fake = prepare_fakes(events, curves, 3, new_fade=variant)[0]
-        assert fake.fade_skipped is variant
-        assert fake.color_value is None
-        assert fake.judgeable is False
 
 
 def test_day_d_is_inclusive_for_color():
