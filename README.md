@@ -345,3 +345,21 @@ change has one. Downloaded data and generated plots stay out of git;
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+### Decision 12(22): bundled v1 revision (Nov 4, 2026)
+
+The color rule uses the latest same-night g+r detection pair available by
+judgment day D, with S/N at least 5 in each band. Pair ordering is the later
+exposure time, then g time, then r time (and color to break exact duplicates).
+Rubin fakes use floor(MJD − 0.5); ZTF uses its frozen Palomar-noon convention.
+Reddening retains its separate interpolated color samples. This implements
+option (ii), approved by Sage, and reverses Decision 12(3). Judgeability stays
+at definition (a); definition (b) is dropped from grid reports.
+
+`recall --grid --tuning-only --new-fade` enables the preregistered candidate
+fade measurement. It is off by default. A band is measurable only with two
+detections strictly after its brightest observed point within three days.
+The original straight-line fit, including the brightest point, is preserved.
+If no band is measurable, fade is skipped; the grid counts these skips.
+The 0.3 mag/day threshold is unchanged. Reporting both variants does not
+adopt the candidate variant or freeze cuts. Test scoring remains held.

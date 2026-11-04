@@ -10,7 +10,7 @@ can read:
 - Fade: the object fades faster than the cut in ``config.py`` in any
   one of g, r, or i. The cut is 0.3 magnitudes per day, signed off from
   ZTFReST. See ``FADE_FASTER_THAN_MAG_PER_DAY``.
-- Color: after the peak, g minus r is redder than the cut in
+- Color: the latest same-night g+r detection pair is redder than the cut in
   ``config.py``. That cut is still a placeholder. This is one moment
   in time, not a change.
 - Reddening: a straight line fitted to g minus r inside a time window
@@ -18,13 +18,11 @@ can read:
   placeholders. This is the "keeps getting redder" check. If there are
   not two colors spread across the window, this rule is skipped.
 
-The fade rule and the color rule have to pass. The reddening rule has
-to pass when it can be measured. A fade or a color that cannot be
-measured fails, with a sentence that says there was not enough data.
-We do not call something a kilonova when we cannot tell how it faded
-or what color it was. Reddening is different: one color snapshot is
-not evidence against a kilonova, so a missing second color does not
-reject the object.
+The color rule must pass. Reddening skips when there are too few colors.
+Fade normally fails when it cannot be measured. Decision 12(22) adds
+an optional, default-off fade variant: a band needs two detections
+strictly after its brightest point within three days. If no band is
+measurable, this variant skips fade and counts the skip.
 
 ``is_kilonova_candidate`` checks one light curve. ``kilohunt check``
 prints that verdict for a CSV, and ``kilohunt demo`` prints it for the
@@ -57,8 +55,9 @@ class RuleResult:
 
     Attributes:
         passed: True when this rule is satisfied, False when it is not,
-            and None when it was skipped. Only the reddening rule
-            skips. It skips when there are not two colors to compare.
+            and None when it was skipped. Reddening skips when there
+            are not two colors to compare.
+            The optional fade variant skips when no band is measurable.
             A skip is not a failure, and it does not reject the object.
             The command line prints that as SKIPPED. The fade rule and
             the single-time color rule still use False when they do not
@@ -86,7 +85,7 @@ class CandidateVerdict:
             passed. A skipped rule (``passed`` is ``None``) does not
             count as a failure and does not block the candidate.
         fade: The fast-fade rule.
-        color: The red-color rule (g minus r at one time after the peak).
+        color: The latest same-night g minus r detection pair.
         reddening: The "keeps getting redder" rule. A straight line
             through g minus r has to climb.
     """
@@ -141,7 +140,10 @@ def evaluate_fade_rule(
     The rule passes when any one configured band fades strictly faster
     than the cut. Bands that were not observed, or that do not have
     enough points, are skipped. If no band can be measured, the rule
-    fails with a "not enough data" sentence.
+    fails with a "not enough data" sentence. The default-off candidate
+    variant requires two detections strictly after the brightest point
+    within the window, preserves the fit including that point, and
+    skips if no band is measurable.
 
     Args:
         light_curve: One object, with the usual light-curve columns.

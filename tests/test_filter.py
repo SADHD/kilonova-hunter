@@ -177,7 +177,7 @@ def test_too_few_points_says_not_enough_data() -> None:
     assert not verdict.color.passed
     assert not verdict.is_candidate
     assert "not enough data" in verdict.fade.explanation.lower()
-    assert "no same-night" not in verdict.color.explanation.lower()
+    assert "g minus r is -0.10" in verdict.color.explanation
 
 
 def test_fade_rule_reads_the_cut_from_the_config() -> None:
@@ -206,7 +206,7 @@ def test_color_rule_reads_the_cut_from_the_config() -> None:
     assert not evaluate_color_rule(curve, stricter).passed
 
 
-def test_color_delay_is_read_from_the_config() -> None:
+def test_color_delay_no_longer_controls_same_night_reading() -> None:
     """At the peak the demo is still blue. One day later it is red.
 
     Both calls use the placeholder color cut. Only the helper setting
