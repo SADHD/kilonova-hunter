@@ -453,7 +453,8 @@ def prepare_fakes(
                     judgeable=judgeable,
                     judgeable_candidate=candidate,
                     model_failed=failed,
-                    fade_passed=False,
+                    fade_passed=new_fade and not failed,
+                    fade_skipped=new_fade and not failed,
                     color_value=None,
                     rises={pair: None for pair in windows},
                 )
