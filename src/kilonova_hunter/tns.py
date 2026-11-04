@@ -9,6 +9,9 @@ come down as a CSV. This module only reads; it never submits a report.
 
 import pandas as pd
 
+# Printed on every human-readable report. The lookup itself still raises.
+TNS_STATUS_LINE = "TNS: not yet implemented."
+
 
 def lookup_classifications(object_names: list[str]) -> pd.DataFrame:
     """Look up the confirmed type of each named transient.

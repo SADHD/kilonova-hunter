@@ -452,6 +452,31 @@ def test_no_known_uncertainties_weight_every_color_equally() -> None:
     assert "weighted every color equally" in all_zero.explanation
 
 
+def test_reddening_is_the_color_increase_while_the_object_fades() -> None:
+    """The rise is how much g minus r increases, not how much the object fades.
+
+    Both bands get fainter. g gets fainter faster, so the color reddens
+    by 0.5 mag per day. From day 0 to day 2 that is a rise of 1.0 mag.
+    The r band faded by 2.0 mag over those two days. The rule reports
+    the color change, and it passes.
+    """
+    times = [0.0, 1.0, 2.0]
+    frame = pd.DataFrame(
+        {
+            "time_days": times + times,
+            "filter": ["r", "r", "r", "g", "g", "g"],
+            "magnitude": [18.0, 19.0, 20.0, 18.0, 19.5, 21.0],
+            "magnitude_error": [0.02] * 6,
+        }
+    )
+    change = g_minus_r_rise(frame)
+    assert change.rise == pytest.approx(1.0, abs=0.02)
+    # 2 magnitudes of fading in r is not the number the rule uses.
+    assert change.rise != pytest.approx(2.0, abs=0.2)
+    result = evaluate_reddening_rule(frame)
+    assert result.passed is True
+
+
 def test_reddening_rule_reads_the_cuts_from_the_config() -> None:
     """The same curve passes a loose rise cut and fails a strict one.
 

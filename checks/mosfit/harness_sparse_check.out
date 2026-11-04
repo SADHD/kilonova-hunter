@@ -1,0 +1,6 @@
+three_component_kilonova_model uses get_optimal_time_array: True | calls: ['_one_component_kilonova_model']
+two_component_kilonova_model uses get_optimal_time_array: True | calls: ['_one_component_kilonova_model', 'two_component_kilonova_model(']
+two_component_bns_ejecta_relation uses get_optimal_time_array: False | calls: ['two_component_kilonova_model(']
+three_component (Villar T2)            sparse - dense (mag) at [0.6, 2.9, 3.0, 5.7, 8.4]: [-0.0024, -0.0008, -0.0013, -0.0008, -0.0001]
+two_component (Villar 2-comp)          sparse - dense (mag) at [0.6, 2.9, 3.0, 5.7, 8.4]: [-0.001, -0.0002, -0.0001, 0.0045, 0.0096]
+two_component_bns_ejecta_relation      sparse - dense (mag) at [0.6, 2.9, 3.0, 5.7, 8.4]: [-0.0007, -0.0002, -0.0002, 0.0009, 0.0013]
