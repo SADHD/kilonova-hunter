@@ -356,10 +356,6 @@ Reddening retains its separate interpolated color samples. This implements
 option (ii) and reverses Decision 12(3). Judgeability stays
 at the frozen filter-independent section 1 definition.
 
-`recall --grid --tuning-only --new-fade` enables the preregistered candidate
-fade measurement. It is off by default. A band is measurable only with two
-detections strictly after its brightest observed point within three days.
-The original straight-line fit, including the brightest point, is preserved.
-If no band is measurable, fade is skipped; the grid counts these skips.
-The 0.3 mag/day threshold is unchanged. Reporting both variants does not
-adopt the candidate variant or freeze cuts. Test scoring remains held.
+The rejected candidate fade measurement has been removed. The current fade
+fit includes the brightest observed point and keeps the 0.3 mag/day threshold.
+An unmeasurable fade fails the rule. Test scoring remains held.

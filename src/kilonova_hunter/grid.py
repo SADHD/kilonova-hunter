@@ -396,8 +396,6 @@ def prepare_fakes(
     curves: pd.DataFrame,
     day: float,
     settings: dict | None = None,
-    *,
-    new_fade: bool = False,
 ) -> list[PreparedFake]:
     """Measure each fake once, using only rows at or before ``day``."""
     spec = load_settings() if settings is None else settings
@@ -437,18 +435,15 @@ def prepare_fakes(
                     distance_mpc=float(row.distance_mpc),
                     judgeable=judgeable,
                     model_failed=failed,
-                    fade_passed=new_fade and not failed,
-                    fade_skipped=new_fade and not failed,
+                    fade_passed=False,
+                    fade_skipped=False,
                     color_value=None,
                     rises={pair: None for pair in windows},
                 )
             )
             continue
-        from dataclasses import replace
 
-        fade_result = evaluate_fade_rule(
-            visible, replace(THRESHOLDS, fade_requires_two_after_peak=new_fade)
-        )
+        fade_result = evaluate_fade_rule(visible, THRESHOLDS)
         fade_passed = fade_result.passed is not False
         color_value = _color_value(visible)
         rises = {pair: _rise_or_skip(visible, pair[0], pair[1]) for pair in windows}
@@ -1579,7 +1574,6 @@ def run_tuning_grid(
     workers: int = 1,
     settings_path: Path | None = None,
     splits: tuple[str, ...] | None = None,
-    new_fade: bool = False,
     copy_seed: int = 2026110401,
 ) -> GridRun:
     """Simulate both populations and the given splits, then score tuning.
@@ -1622,9 +1616,7 @@ def run_tuning_grid(
             if split != "tuning":
                 continue
             prepared = {
-                day: prepare_fakes(
-                    sample.events, sample.light_curves, day, settings, new_fade=new_fade
-                )
+                day: prepare_fakes(sample.events, sample.light_curves, day, settings)
                 for day in JUDGE_DAYS
             }
             rows.extend(
@@ -1648,7 +1640,7 @@ def run_tuning_grid(
     copy_score = score_exact_copies(
         copies.events,
         copies.light_curves,
-        dict(placeholder, fade_requires_two_after_peak=new_fade),
+        placeholder,
     )
     blocked, copy_status = copy_sign_off(copy_score)
     reasons: list[str] = []

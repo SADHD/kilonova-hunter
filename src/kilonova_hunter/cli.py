@@ -168,11 +168,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     recall.add_argument(
-        "--new-fade",
-        action="store_true",
-        help="Decision 12(22) candidate fade measurement; default off.",
-    )
-    recall.add_argument(
         "--tuning-only",
         action="store_true",
         help=(
@@ -1120,7 +1115,6 @@ def _run_grid(args) -> None:
         sample_size=size,
         workers=max(1, args.workers),
         splits=splits,
-        new_fade=getattr(args, "new_fade", False),
     )
     print(result.text)
     if result.sign_off_blocker:

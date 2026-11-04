@@ -215,7 +215,6 @@ def fade_rates(
             band=band,
             min_points=settings.min_points_per_band,
             window_days=settings.fade_window_days,
-            strict_after_peak=settings.fade_requires_two_after_peak,
         )
     return rates
 
@@ -565,7 +564,6 @@ def _fade_rate_for_one_band(
     band: str,
     min_points: int,
     window_days: float,
-    strict_after_peak: bool = False,
 ) -> BandFade:
     """Fit one band's fade, using only the points after its own peak.
 
@@ -594,16 +592,6 @@ def _fade_rate_for_one_band(
         (usable_points["time_days"] >= peak_time - _SAME_VISIT_DAYS)
         & (usable_points["time_days"] <= window_end + _SAME_VISIT_DAYS)
     ]
-    # Decision 12(22): change measurability only, preserving the original fit.
-    if strict_after_peak:
-        after_peak = in_window.time_days > peak_time + _SAME_VISIT_DAYS
-        if int(after_peak.sum()) < 2:
-            return BandFade(
-                band,
-                None,
-                "Fewer than two detections strictly after the brightest point "
-                "within the fade window.",
-            )
     times = in_window["time_days"].to_numpy(dtype=float)
     magnitudes = in_window["magnitude"].to_numpy(dtype=float)
 

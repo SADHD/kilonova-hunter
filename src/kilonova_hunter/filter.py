@@ -57,7 +57,6 @@ class RuleResult:
         passed: True when this rule is satisfied, False when it is not,
             and None when it was skipped. Reddening skips when there
             are not two colors to compare.
-            The optional fade variant skips when no band is measurable.
             A skip is not a failure, and it does not reject the object.
             The command line prints that as SKIPPED. The fade rule and
             the single-time color rule still use False when they do not
@@ -168,10 +167,9 @@ def evaluate_fade_rule(
     if fastest_rate is None:
         bands = _or_list(settings.fade_bands)
         return RuleResult(
-            passed=None if settings.fade_requires_two_after_peak else False,
+            passed=False,
             explanation=(
-                ("Skipped: " if settings.fade_requires_two_after_peak else "")
-                + "Not enough data to measure a fade: a fit needs at least "
+                "Not enough data to measure a fade: a fit needs at least "
                 f"{settings.min_points_per_band} points after the peak in "
                 f"{bands}, and none of those bands has that many."
             ),
