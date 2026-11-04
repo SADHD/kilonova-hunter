@@ -171,3 +171,27 @@ def test_new_copy_seed_changes_draw_and_is_recorded(tmp_path, monkeypatch):
             json.loads((result.cache_dir / "manifest.json").read_text())["seed"] == seed
         )
     assert seen == [2026110401, 2026110402]
+
+
+def test_empty_detection_history_counts_fade_skip_only_in_variant():
+    from kilonova_hunter.grid import prepare_fakes
+
+    events = pd.DataFrame(
+        [
+            dict(
+                object_id="empty",
+                kind="2017-like",
+                distance_mpc=40,
+                model_failed=False,
+                merger_mjd=60000.0,
+            )
+        ]
+    )
+    curves = pd.DataFrame(
+        columns=["object_id", "time_days", "filter", "magnitude", "magnitude_error"]
+    )
+    for variant in (False, True):
+        fake = prepare_fakes(events, curves, 3, new_fade=variant)[0]
+        assert fake.fade_skipped is variant
+        assert fake.color_value is None
+        assert fake.judgeable is False
