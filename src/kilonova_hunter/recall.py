@@ -1610,12 +1610,7 @@ def format_recall_report(
     )
     lines.append(TNS_STATUS_LINE)
     lines.append(EARLY_GAP_MODEL_LIMIT)
-    lines.append(
-        "Judgeable (a) is the official section 1 rule. "
-        "Judgeable (b) also needs a usable g minus r at r-peak + 1 day, "
-        "using the 1.0-day interpolation limit. (b) is not official. "
-        "It does not replace (a)."
-    )
+    lines.append("Judgeable (a) is the frozen filter-independent section 1 rule.")
     lines.append(
         "Fade faster than "
         f"{THRESHOLDS.fade_faster_than_mag_per_day:.2f} mag/day, "

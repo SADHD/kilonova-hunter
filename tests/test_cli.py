@@ -1671,7 +1671,6 @@ def test_grid_exits_2_when_a_non_chosen_cell_breaks_rule_5(
         return {
             "n_copies": 50,
             "n_judgeable": 50,
-            "n_judgeable_candidate": 50,
             "n_caught_judgeable": 50,
             "n_caught_candidate": 50,
             "blocker": False,
