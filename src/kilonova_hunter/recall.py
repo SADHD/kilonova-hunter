@@ -48,8 +48,9 @@ function:
 - The default survey is a simple wide-fast-deep pattern, not Rubin's
   real scheduler. A field is revisited every 2 to 4 nights. Each visit
   is two exposures about 30 minutes apart, in two of g, r, and i
-  (pairs such as g+r, r+i, or g+i). The first visit is at a random
-  time in that gap, so the merger is not always just before a visit.
+  (pairs such as g+r, r+i, or g+i). The sequence is already running
+  before the merger. The merger is dropped in at a random time, and
+  only the visits after it are kept.
   ``--cadence simple`` keeps the older pattern: each band on its own
   clock, at least one day between visits of that band.
 - A point fainter than that band's limiting magnitude is a
@@ -83,13 +84,24 @@ from kilonova_hunter.config import THRESHOLDS
 from kilonova_hunter.features import (
     fade_rates,
     g_minus_r_at_time,
-    g_minus_r_over_time,
     g_minus_r_rise,
     peak_time_days,
 )
 from kilonova_hunter.filter import format_verdict, is_kilonova_candidate
+from kilonova_hunter.judge import is_judgeable
+from kilonova_hunter.tns import TNS_STATUS_LINE
 
 logger = logging.getLogger(__name__)
+
+# Printed on the recall, grid, and test-set reports. Decision Log 12(15).
+# The bar is not loosened and the model is not tuned to close the gap.
+EARLY_GAP_MODEL_LIMIT = (
+    "Known model limit: radioactive heating only, no cocoon shock cooling "
+    "(Piro & Kollmeier 2018). The color rule is measured at the r-band peak "
+    "plus 1 day, which is past day 0.8, so the early gap does not affect "
+    "that rule in either direction. Its only effect is that the fakes are "
+    "too faint before day 0.8, which biases day-3 recall low."
+)
 
 # The official recall number uses the test set. The tuning set is written
 # so the science lead can try cuts without looking at the test set.
@@ -196,10 +208,19 @@ class PopulationSettings:
             masses. Fixed. About the heaviest known pulsars.
         zeta: Fraction of the disk that becomes unbound. Fixed.
         vej_wind: Disk-wind speed, as a fraction of the speed of light.
-        kappa_dynamical: Opacity of the dynamical (redder) ejecta.
-        kappa_wind: Opacity of the disk wind (bluer ejecta).
+        kappa_dynamical: Opacity of the dynamical ejecta, in cm^2/g.
+            10 is this project's assumption. redback's prior draws
+            opacities uniformly from 1 to 30.
+        kappa_wind: Opacity of the disk wind, in cm^2/g. 0.5 is this
+            project's assumption, not a redback default.
         tf_dynamical: Temperature floor of the dynamical ejecta, in kelvin.
-        tf_wind: Temperature floor of the disk wind, in kelvin.
+            2500 K is this project's assumption. redback 1.20.0 does not
+            supply a default. ``tf_1`` and ``tf_2`` are required, and the
+            shipped prior is log-uniform from 100 K to 6000 K.
+        tf_wind: Temperature floor of the disk wind, in kelvin. 5000 K
+            is this project's assumption, same as ``tf_dynamical``.
+            A NOT-COUNTED sensitivity uses 3745 K on the dynamical
+            ejecta and 674 K on the wind. That run is not this population.
     """
 
     count: int = 200
@@ -217,6 +238,9 @@ class PopulationSettings:
     vej_wind: float = 0.10
     kappa_dynamical: float = 10.0
     kappa_wind: float = 0.5
+    # Project assumptions, not redback defaults. redback 1.20.0 requires
+    # tf_1 and tf_2. Its prior is log-uniform from 100 K to 6000 K, and
+    # its opacities are uniform from 1 to 30. Kept on purpose.
     tf_dynamical: float = 2500.0
     tf_wind: float = 5000.0
 
@@ -249,9 +273,8 @@ class SurveySettings:
             revisits a field every few nights and takes two filters
             half an hour apart. Simple gives each band its own clock.
         wfd_gap_min_days: Shortest wait between wide-fast-deep visits.
-        wfd_gap_max_days: Longest wait between those visits. The first
-            visit is also placed at random between 0 and this number,
-            which is the start phase relative to the merger.
+        wfd_gap_max_days: Longest wait between those visits. The same
+            range is used before and after the merger.
         revisit_gap_days: For the simple cadence, the minimum wait
             between two visits of the same band.
         nightly_gap_days: For the simple cadence, an extra random wait
@@ -354,6 +377,14 @@ class FakeEvent:
     kappa_wind: float
     tf_dynamical: float
     tf_wind: float
+    # Sky position and merger time. The older draw leaves these at the
+    # defaults. The evaluation harness fills them in: the night index
+    # is floor(merger_mjd + time_days - 0.5), and the dust map is read
+    # at ra_deg, dec_deg.
+    ra_deg: float = float("nan")
+    dec_deg: float = float("nan")
+    galactic_b_deg: float = float("nan")
+    merger_mjd: float = 60000.0
 
 
 @dataclass(frozen=True)
@@ -617,32 +648,70 @@ def survey_visits(
     return _simple_visits(rng, survey)
 
 
+# The wide-fast-deep sequence is already running when the merger
+# happens. Thirty days is several revisits, so the merger is not a
+# special first night and there is no separate 0-to-4 day first wait.
+_WFD_PRE_MERGER_DAYS = 30.0
+
+
+def _wfd_pair_starts(
+    rng: np.random.Generator,
+    survey: SurveySettings,
+) -> np.ndarray:
+    """Times when each visit pair starts, in days after the merger.
+
+    The survey is built first, as a continuous sequence of 2 to 4 day
+    gaps. The merger is then placed at a uniform random time on that
+    sequence. A uniform instant lands in a longer gap more often, which
+    is the length weighting a running survey actually has. Drawing the
+    gap first and then a uniform time inside it would miss that, and
+    the mean wait until the next visit would be 1.5 days instead of
+    14/9 days. Times before the merger are negative. The earliest pair
+    is at least ``_WFD_PRE_MERGER_DAYS`` before the merger.
+    """
+    low = survey.wfd_gap_min_days
+    high = survey.wfd_gap_max_days
+    # Long enough that the merger is not stuck on the first few gaps,
+    # where a sequence that starts on a visit has not settled.
+    target = max(_WFD_PRE_MERGER_DAYS + survey.survey_length_days + high, 120.0)
+    starts = [0.0]
+    clock = 0.0
+    while clock < target:
+        clock += float(rng.uniform(low, high))
+        starts.append(clock)
+    earliest = _WFD_PRE_MERGER_DAYS
+    latest = clock - survey.survey_length_days
+    merger = float(rng.uniform(earliest, latest))
+    return np.asarray(starts, dtype=float) - merger
+
+
 def _wfd_visits(
     rng: np.random.Generator,
     survey: SurveySettings,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Wide-fast-deep visits: two filters, then a gap of a few nights.
 
-    The first visit is a random phase between 0 and the longest gap, so
-    the merger can fall in the middle of a gap. Each later visit waits a
-    fresh random gap between the shortest and longest gap. On that night
-    the survey takes two exposures about 30 minutes apart, in a random
-    pair drawn from g+r, r+i, and g+i, in either order.
+    The survey is already visiting the field before the merger. Only
+    visits at or after the merger are returned. A pair that started
+    before the merger is dropped whole, so one filter of that pair is
+    never kept on its own. On each night the survey takes two exposures
+    about 30 minutes apart, in a random pair drawn from g+r, r+i, and
+    g+i, in either order.
     """
     times: list[float] = []
     bands: list[str] = []
-    clock = float(rng.uniform(0.0, survey.wfd_gap_max_days))
-    while clock <= survey.survey_length_days:
+    for clock in _wfd_pair_starts(rng, survey):
+        # A pair that started before the merger stays before it.
+        if float(clock) < 0.0 or float(clock) > survey.survey_length_days:
+            continue
         pair = _WFD_PAIRS[int(rng.integers(0, len(_WFD_PAIRS)))]
         if float(rng.random()) < 0.5:
             pair = (pair[1], pair[0])
         for offset, band in ((0.0, pair[0]), (_THIRTY_MINUTES_DAYS, pair[1])):
-            when = clock + offset
+            when = float(clock) + offset
             if when <= survey.survey_length_days:
                 times.append(when)
                 bands.append(band)
-        gap = float(rng.uniform(survey.wfd_gap_min_days, survey.wfd_gap_max_days))
-        clock += gap
     if not times:
         return np.array([], dtype=float), np.array([], dtype=str)
     order = np.argsort(times, kind="stable")
@@ -875,6 +944,9 @@ def redback_magnitudes(
         two_component_kilonova_model,
     )
 
+    from kilonova_hunter.model_grid import nan_after_two_component_cap
+    from kilonova_hunter.redback_fix import corrected_diffusion
+
     sn_bands = np.array([_SNCOSMO_BANDS[str(band)] for band in bands])
     shared = {
         "bands": sn_bands,
@@ -882,41 +954,45 @@ def redback_magnitudes(
         "cosmology": Planck18,
     }
     time_array = np.asarray(times, dtype=float)
-    if event.kind == "at2017gfo":
-        # Red component first, then blue. The order matches the
-        # population model, where component 1 is the redder dynamical
-        # ejecta and component 2 is the bluer wind. The numbers are the
-        # Villar et al. 2017 two-component best fit.
-        raw = two_component_kilonova_model(
-            time_array,
-            event.redshift,
-            0.050,
-            0.149,
-            1151.0,
-            3.65,
-            0.023,
-            0.256,
-            3983.0,
-            0.5,
-            **shared,
-        )
-    else:
-        raw = two_component_bns_ejecta_relation(
-            time_array,
-            event.redshift,
-            event.mass_1,
-            event.mass_2,
-            event.lambda_1,
-            event.lambda_2,
-            event.mtov,
-            event.zeta,
-            event.vej_wind,
-            event.kappa_dynamical,
-            event.kappa_wind,
-            event.tf_dynamical,
-            event.tf_wind,
-            **shared,
-        )
+    with corrected_diffusion():
+        if event.kind == "at2017gfo":
+            # Red component first, then blue. The order matches the
+            # population model, where component 1 is the redder dynamical
+            # ejecta and component 2 is the bluer wind. The numbers are the
+            # Villar et al. 2017 two-component best fit.
+            raw = two_component_kilonova_model(
+                time_array,
+                event.redshift,
+                0.050,
+                0.149,
+                1151.0,
+                3.65,
+                0.023,
+                0.256,
+                3983.0,
+                0.5,
+                **shared,
+            )
+        else:
+            raw = two_component_bns_ejecta_relation(
+                time_array,
+                event.redshift,
+                event.mass_1,
+                event.mass_2,
+                event.lambda_1,
+                event.lambda_2,
+                event.mtov,
+                event.zeta,
+                event.vej_wind,
+                event.kappa_dynamical,
+                event.kappa_wind,
+                event.tf_dynamical,
+                event.tf_wind,
+                **shared,
+            )
+    # Both branches call the two-component model. It freezes after
+    # source-frame day 6. A later time is NaN, not that frozen magnitude.
+    raw = nan_after_two_component_cap(time_array, raw, event.redshift)
     dust = np.array([dust_dimming_mag(str(band), event.ebv) for band in bands])
     return np.asarray(raw, dtype=float) + dust
 
@@ -1134,17 +1210,23 @@ def _blank_diagnosis(window_days: float) -> dict[str, object]:
 def diagnose_catch_window(
     observed: pd.DataFrame,
     window_days: float,
+    merger_mjd: float = 60000.0,
 ) -> dict[str, object]:
     """Measure the rules on detections inside ``window_days`` of the merger.
 
-    The window starts at the merger. ``judgeable`` is true when there
-    are at least two epochs and at least one g minus r color, so the
-    fade rule and the color rule can both be measured. A reddening
-    result of ``skipped`` means there were not two colors to fit. That
-    does not reject the object. Fade and color use ``not_enough_data``
-    instead of skipping: too little data fails those two rules.
-    ``below_cut`` means the number was measured and it was on the wrong
-    side of the placeholder cut.
+    The window starts at the merger. ``judgeable`` uses the frozen rule
+    in ``judge.py``: two detections in one band at signal-to-noise of
+    5 or more and at least 0.5 days apart, plus one night with both g
+    and r at that signal-to-noise. The filter cuts are not part of it.
+    ``merger_mjd`` sets which visits share a night via
+    ``floor(MJD - 0.5)``. The default is only for a table that has no
+    merger time of its own.
+
+    A reddening result of ``skipped`` means there were not two colors
+    to fit. That does not reject the object. Fade and color use
+    ``not_enough_data`` instead of skipping: too little data fails
+    those two rules. ``below_cut`` means the number was measured and
+    it was on the wrong side of the placeholder cut.
     """
     visible = light_curve_for_the_filter(observed, window_days)
     if visible.empty:
@@ -1165,7 +1247,11 @@ def diagnose_catch_window(
     peak = peak_time_days(visible, "r")
     color_value = float("nan")
     if peak is not None:
-        color = g_minus_r_at_time(visible, peak + THRESHOLDS.color_days_after_peak)
+        color = g_minus_r_at_time(
+            visible,
+            peak + THRESHOLDS.color_days_after_peak,
+            max_gap_days=THRESHOLDS.max_color_interpolation_gap_days,
+        )
         if color.g_minus_r is not None:
             color_value = float(color.g_minus_r)
     if not np.isfinite(color_value):
@@ -1184,9 +1270,9 @@ def diagnose_catch_window(
     else:
         reddening_result = "below_cut"
 
-    judgeable = _epoch_count(visible["time_days"].to_numpy()) >= 2 and (
-        len(g_minus_r_over_time(visible)) >= 1
-    )
+    # The full table, not the already-cut window: is_judgeable drops
+    # every row after `window_days` itself, including non-detections.
+    judgeable = is_judgeable(observed, window_days, merger_mjd=merger_mjd)
     verdict = is_kilonova_candidate(visible)
     return {
         "n_detections_in_window": int(len(visible)),
@@ -1375,7 +1461,11 @@ def build_recall_set(
             caught_later = False
         else:
             never = observed.empty
-            diagnosis = diagnose_catch_window(observed, survey.catch_within_days)
+            diagnosis = diagnose_catch_window(
+                observed,
+                survey.catch_within_days,
+                merger_mjd=event.merger_mjd,
+            )
             caught_later = _candidate_in_window(observed, CONTEXT_WINDOW_DAYS)
         event_rows.append(
             _event_row(
@@ -1492,6 +1582,13 @@ def run_recall(
     return text
 
 
+LEGACY_RECALL_LINE = (
+    "LEGACY. kilohunt recall without --grid is the older scorer. "
+    "It is not the official tuning grid, and its test-set number is "
+    "not the official result."
+)
+
+
 def format_recall_report(
     sets: list[tuple[RecallNumbers, pd.DataFrame]],
     *,
@@ -1500,11 +1597,24 @@ def format_recall_report(
     output_dir: Path,
     cadence: str = CADENCE_WFD,
 ) -> str:
-    """Turn the scores into the paragraphs ``kilohunt recall`` prints."""
+    """Turn the scores into the paragraphs ``kilohunt recall`` prints.
+
+    This report is the legacy path. ``kilohunt recall --grid`` is the
+    official tuning grid. This function is not that grid.
+    """
     by_name = {item.set_name: (item, events) for item, events in sets}
     lines: list[str] = []
+    lines.append(LEGACY_RECALL_LINE)
     lines.append(
         "Recall uses the placeholder cuts in config.py. They have not been tuned."
+    )
+    lines.append(TNS_STATUS_LINE)
+    lines.append(EARLY_GAP_MODEL_LIMIT)
+    lines.append(
+        "Judgeable (a) is the official section 1 rule. "
+        "Judgeable (b) also needs a usable g minus r at r-peak + 1 day, "
+        "using the 1.0-day interpolation limit. (b) is not official. "
+        "Sage has to approve it before it can replace (a)."
     )
     lines.append(
         "Fade faster than "
@@ -1631,7 +1741,8 @@ def _cadence_sentence(cadence: str) -> str:
             "Cadence: wide-fast-deep style, which is the default. "
             "A field is visited every 2 to 4 nights. Each visit is two "
             "exposures about 30 minutes apart, in two of g, r, and i. "
-            "The first visit is at a random time in that gap."
+            "That sequence starts before the merger. The merger is dropped "
+            "in at a random time, and only later visits are kept."
         )
     return (
         "Cadence: simple, not the default. Each of g, r, and i has its "
@@ -1651,10 +1762,11 @@ def _diagnostic_lines(events: pd.DataFrame) -> list[str]:
     caught_judge = int((judgeable & events["is_candidate"].astype(bool)).sum())
     lines.append(
         f"Judgeable fakes: {n_judge} of {total}. "
-        "A fake is judgeable when the first 3 days after the merger "
-        "hold at least two detections at different times and at least "
-        "one g minus r color, so the fade rule and the color rule can "
-        "both be measured."
+        "A fake is judgeable by day 3 when it has two detections in the "
+        "same band at signal-to-noise of 5 or more, at least 0.5 days "
+        "apart, and one night with both g and r at that signal-to-noise. "
+        "The filter cuts are not part of this. A night is floor(MJD - 0.5), "
+        "which changes at noon UTC."
     )
     if n_judge:
         low, high = wilson_interval(caught_judge, n_judge)
@@ -1821,7 +1933,11 @@ def _write_sanity_fake(
         never = False
         caught_later = False
     else:
-        diagnosis = diagnose_catch_window(observed, survey.catch_within_days)
+        diagnosis = diagnose_catch_window(
+            observed,
+            survey.catch_within_days,
+            merger_mjd=event.merger_mjd,
+        )
         caught_later = _candidate_in_window(observed, CONTEXT_WINDOW_DAYS)
         never = observed.empty
         if int(diagnosis["n_detections_in_window"]) == 0:

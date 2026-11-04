@@ -38,3 +38,46 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+  test-sim:
+    name: Ruff and pytest with the sim extra
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install a C compiler for the sim extra
+        # sncosmo 2.13.1 has no Linux wheel, so this job compiles it.
+        # uv's own Python 3.12 supplies the headers. Ubuntu 26 has no
+        # python3.12-dev package.
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Install the project with the sim extra
+        # This job is what runs the redback wrapper tests and the
+        # Planck18 redshift test. The job above skips them.
+        run: uv sync --locked --extra sim
+
+      - name: Check for mistakes with Ruff
+        run: uv run ruff check
+
+      - name: Check formatting with Ruff
+        run: uv run ruff format --check
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Rerun the MOSFiT checks against the committed output
+        # Each checks/mosfit script that has a saved .out is run again.
+        # stdout is the result table. Library logs stay on stderr, and the
+        # bandpasses are in the repo, so a fresh runner does not download
+        # them. A number may move by one unit in its last printed decimal.
+        # Any other stdout change fails the job.
+        run: uv run python scripts/diff_mosfit_outputs.py
+
+      - name: The external-check CSV is unchanged by that rerun
+        run: git diff --exit-code docs/mosfit_external_check.csv

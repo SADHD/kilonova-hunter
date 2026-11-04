@@ -293,6 +293,8 @@ def test_recall_writes_two_sets_from_different_seeds(tmp_path: Path) -> None:
     assert (tmp_path / "at2017gfo" / "events.csv").is_file()
     assert (tmp_path / "report.txt").is_file()
     assert "Test set (this is the recall number)" in text
+    assert "LEGACY" in text
+    assert "not the official" in text
     assert "not the official number" in text
     assert "Never detected at all" in text
     assert "have not been tuned" in text
@@ -312,6 +314,7 @@ def test_recall_help_lists_the_options(capsys: pytest.CaptureFixture[str]) -> No
     assert "--seed" in printed
     assert "--which" in printed
     assert "--cadence" in printed
+    assert "legacy" in printed.lower()
 
 
 def test_recall_without_redback_explains_the_extra(
@@ -358,8 +361,8 @@ def test_three_days_are_counted_from_the_merger() -> None:
 def test_wide_fast_deep_visits_come_in_pairs() -> None:
     """The default cadence takes two different filters about 30 minutes apart.
 
-    The gap from one pair to the next is between 2 and 4 days, and the
-    first visit is somewhere in that first gap.
+    The gap from one pair to the next is between 2 and 4 days. The first
+    visit after the merger is no later than one of those gaps.
     """
     survey = SurveySettings(cadence="wfd", survey_length_days=12.0)
     times, bands = survey_visits(np.random.default_rng(1), survey)
@@ -376,6 +379,30 @@ def test_wide_fast_deep_visits_come_in_pairs() -> None:
     for first, second in zip(bands[::2], bands[1::2], strict=True):
         assert first != second
         assert frozenset((first, second)) in allowed
+
+
+def test_wide_fast_deep_sequence_starts_before_the_merger() -> None:
+    """Visits run before the merger. The gap that crosses day 0 is 2 to 4 days.
+
+    Returned visits are only the ones at or after the merger. A pair that
+    started earlier is not split.
+    """
+    from kilonova_hunter.recall import _WFD_PRE_MERGER_DAYS, _wfd_pair_starts
+
+    survey = SurveySettings(cadence="wfd", survey_length_days=12.0)
+    rng = np.random.default_rng(2)
+    starts = _wfd_pair_starts(rng, survey)
+    assert float(starts.min()) <= -_WFD_PRE_MERGER_DAYS
+    before = starts[starts < 0.0]
+    after = starts[starts >= 0.0]
+    assert len(before) >= 1
+    assert len(after) >= 1
+    gap_across = float(after[0] - before[-1])
+    assert gap_across >= survey.wfd_gap_min_days - 1e-9
+    assert gap_across <= survey.wfd_gap_max_days + 1e-9
+    times, _bands = survey_visits(np.random.default_rng(2), survey)
+    assert float(times.min()) >= 0.0
+    assert float(times[0]) <= survey.wfd_gap_max_days + 1e-9
 
 
 def test_too_many_model_errors_abort_the_run() -> None:
@@ -493,16 +520,16 @@ def test_redback_sanity_fake_returns_finite_magnitudes() -> None:
         assert magnitudes.shape == (3,)
         assert np.isfinite(magnitudes).all()
 
-        # No dust. The brightest r point of this analytic model sits near
-        # 18.1. Observed peak r is about 17.2 to 17.5, so the model is
-        # faint by under a magnitude. A distance-unit mistake would move
-        # it by several magnitudes, which this range would catch.
+        # No dust. With the diffusion integral fixed, the brightest r
+        # point of this model sits near 17.3. Before that fix it sat
+        # near 18.1. A distance-unit mistake would move it by several
+        # magnitudes, which this range would catch.
         no_dust = replace(event, ebv=0.0)
         grid = np.linspace(0.4, 2.0, 17)
         peak_r = float(
             np.min(redback_magnitudes(grid, np.array(["r"] * len(grid)), no_dust))
         )
-        assert 17.6 < peak_r < 18.6
+        assert 16.8 < peak_r < 17.8
 
         from redback.ejecta_relations import TwoComponentBNS
 
@@ -573,3 +600,125 @@ def test_build_recall_set_columns_match_what_the_report_reads() -> None:
         assert column in events.columns
     assert numbers.n_total == 2
     assert set(curves["object_id"]) <= set(events["object_id"])
+
+
+def test_cache_key_includes_depths_redback_and_the_dust_map() -> None:
+    """An old cache is not reused when the depths, redback, or dust map differ.
+
+    The string "False" in a judgeable column counts as no, not as yes.
+    """
+    from kilonova_hunter.sample import (
+        SampleSizeSettings,
+        _manifest,
+        _redback_version,
+        _result_from_frames,
+        _same_setup,
+    )
+    from kilonova_hunter.sky import DustSource
+
+    survey = SurveySettings()
+    dust = DustSource(mode="sfd")
+    manifest = _manifest(
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=survey,
+        settings=SampleSizeSettings(),
+        completed=0,
+        events=pd.DataFrame(),
+        status="ready",
+    )
+    assert manifest["redback_version"] == _redback_version()
+    assert manifest["diffusion_fix"] == "arnett-factor-2"
+    assert manifest["dust_map"].startswith("SFD x 0.86")
+    assert manifest["survey"]["error_floor_mag"] == survey.error_floor_mag
+    assert "g" in manifest["survey"]["limits"]
+    assert _same_setup(
+        manifest,
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=survey,
+    )
+    stale = dict(manifest)
+    del stale["redback_version"]
+    assert not _same_setup(
+        stale,
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=survey,
+    )
+    louder_floor = replace(survey, error_floor_mag=survey.error_floor_mag + 0.05)
+    assert not _same_setup(
+        manifest,
+        population="2017-like",
+        split="tuning",
+        dust=dust,
+        survey=louder_floor,
+    )
+    events = pd.DataFrame(
+        {
+            "judgeable_day3": ["False", "True", "1"],
+            "judgeable_day5": ["False", "False", "False"],
+            "judgeable_day7": ["0", "0", "0"],
+            "model_failed": ["False", "False", "False"],
+        }
+    )
+    loaded = _result_from_frames(
+        population="2017-like",
+        split="tuning",
+        status="ready",
+        events=events,
+        curves=pd.DataFrame(),
+        dust=dust,
+        cache_dir=Path("."),
+    )
+    assert loaded.n_judgeable_day3 == 2
+    assert loaded.n_model_failed == 0
+
+
+def test_realistic_temperature_floors_stay_at_the_project_assumptions() -> None:
+    """5000 K and 2500 K are this project's assumptions, not redback defaults."""
+    from kilonova_hunter.villar import (
+        NOT_COUNTED_TF_DYNAMICAL_K,
+        NOT_COUNTED_TF_WIND_K,
+        not_counted_realistic_event,
+    )
+
+    settings = PopulationSettings()
+    assert settings.tf_wind == 5000.0
+    assert settings.tf_dynamical == 2500.0
+    event = replace(at2017gfo_like_event(), kind="population", ebv=0.0)
+    variant = not_counted_realistic_event(event)
+    assert variant.tf_dynamical == NOT_COUNTED_TF_DYNAMICAL_K == 3745.0
+    assert variant.tf_wind == NOT_COUNTED_TF_WIND_K == 674.0
+    assert event.tf_dynamical == 2500.0
+    assert event.tf_wind == 5000.0
+    assert "NOT-COUNTED" in (not_counted_realistic_event.__doc__ or "")
+    assert "this project's assumption" in (PopulationSettings.__doc__ or "")
+    from kilonova_hunter.villar import draw_opacity_prior
+
+    draws = np.array(
+        [draw_opacity_prior(np.random.default_rng(seed)) for seed in range(200)]
+    )
+    assert draws.min() >= 1.0
+    assert draws.max() <= 30.0
+    assert draws.std() > 1.0
+
+
+def test_mean_first_visit_wait_matches_the_length_weighted_gap() -> None:
+    """A random instant in a running survey waits 14/9 days, not 1.5.
+
+    Gaps are uniform from 2 to 4 days. The mean forward wait in a
+    stationary sequence is E[gap^2] / (2 E[gap]) = 14/9 days.
+    """
+    from kilonova_hunter.recall import _wfd_pair_starts
+
+    survey = SurveySettings(cadence="wfd", survey_length_days=8.0)
+    waits = []
+    for seed in range(1500):
+        starts = _wfd_pair_starts(np.random.default_rng(seed), survey)
+        after = starts[starts >= 0.0]
+        waits.append(float(after[0]))
+    assert float(np.mean(waits)) == pytest.approx(14.0 / 9.0, abs=0.05)

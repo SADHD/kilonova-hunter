@@ -24,9 +24,11 @@ kilohunt = "kilonova_hunter.cli:main"
 # Install with: uv sync --extra sim
 # Left out of the default install so tests and CI stay light.
 sim = [
-    # 1.20.0 is the version the recall numbers in the pull request were
-    # computed with. Older releases are not checked.
-    "redback>=1.20.0",
+    "dustmaps>=1.0.14",
+    # 1.20.0 is the version the diffusion wrapper was written for.
+    # A newer redback may already include the missing factor of 2, and
+    # the wrapper would apply it twice. Older releases are not checked.
+    "redback==1.20.0",
 ]
 
 [dependency-groups]
@@ -41,16 +43,28 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: calls the real light-curve model and is expected to take longer",
+]
 
 [tool.ruff]
 line-length = 88
 target-version = "py312"
 src = ["src", "tests", "notebooks"]
+# reference/ is the MOSFiT commit 6595248 text. Ruff must not reformat it.
+# force-exclude keeps that true even when the path is passed on the command line.
+extend-exclude = ["checks/mosfit/reference"]
+force-exclude = true
 
 [tool.ruff.lint]
 # E and F catch real mistakes. I sorts imports. UP modernizes syntax.
 # B flags a few easy-to-miss bugs, such as a mutable default argument.
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# bootstrap.install() has to run before these scripts import sidebyside_lib
+# and kilonova_hunter. Every other check in the file still runs.
+"checks/mosfit/*.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["kilonova_hunter"]

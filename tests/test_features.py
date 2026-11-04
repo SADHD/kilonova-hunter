@@ -132,21 +132,53 @@ def test_color_at_a_shared_time_is_g_minus_r() -> None:
 
 
 def test_color_between_points_is_read_off_the_joining_line() -> None:
-    """Halfway between two samples, each band is halfway in magnitude.
+    """Halfway between two samples one day apart, each band is halfway.
 
     g goes from 20 to 22, so at the midpoint it is 21. r goes from 19 to
-    21, so at the midpoint it is 20. g minus r is 1.
+    21, so at the midpoint it is 20. g minus r is 1. One day is the
+    longest gap a color may cross.
     """
     curve = _curve(
         [
             (0.0, "g", 20.0),
-            (2.0, "g", 22.0),
+            (1.0, "g", 22.0),
             (0.0, "r", 19.0),
-            (2.0, "r", 21.0),
+            (1.0, "r", 21.0),
         ]
     )
-    color = g_minus_r_at_time(curve, 1.0)
+    color = g_minus_r_at_time(curve, 0.5)
     assert color.g_minus_r == pytest.approx(1.0)
+
+
+def test_color_across_a_gap_longer_than_one_day_is_no_data() -> None:
+    """A 6.8-day hole is no data. A gap of one day still interpolates.
+
+    6.8 days is the g spacing on the day-7 fake that was flagged only
+    because a color was drawn between day 0.02 and day 6.83.
+    """
+    wide = _curve(
+        [
+            (0.02, "g", 18.0),
+            (6.82, "g", 22.0),
+            (2.30, "r", 17.0),
+            (2.32, "r", 17.1),
+        ]
+    )
+    missing = g_minus_r_at_time(wide, 2.31)
+    assert missing.g_minus_r is None
+    assert "not enough data" in missing.explanation.lower()
+    assert "1.0" in missing.explanation
+
+    short = _curve(
+        [
+            (0.0, "g", 20.0),
+            (0.4, "g", 20.4),
+            (0.0, "r", 19.0),
+            (0.4, "r", 19.2),
+        ]
+    )
+    color = g_minus_r_at_time(short, 0.2)
+    assert color.g_minus_r == pytest.approx(1.1)
 
 
 def test_color_outside_the_data_is_not_enough_data() -> None:
@@ -180,25 +212,26 @@ def test_missing_column_is_a_clear_error() -> None:
 def test_color_over_time_stays_inside_the_data() -> None:
     """A color is read only where both bands have coverage.
 
-    g is measured at day 0 and day 2. r is measured at day 1 and day 3.
-    The overlap is day 1 to day 2. Day 0 would require guessing r before
-    its first point, and day 3 would require guessing g after its last
-    point. Neither is included. The magnitudes in between are read off
-    the straight line that joins the neighbors.
+    g is measured at day 0 and day 0.8. r is measured at day 0.4 and day
+    1.2. The overlap is day 0.4 to day 0.8. Day 0 would require guessing
+    r before its first point, and day 1.2 would require guessing g after
+    its last point. Neither is included. The magnitudes in between are
+    read off the straight line that joins the neighbors. Each of those
+    gaps is shorter than one day.
     """
     curve = _curve(
         [
             (0.0, "g", 20.0),
-            (2.0, "g", 22.0),
-            (1.0, "r", 19.0),
-            (3.0, "r", 21.0),
+            (0.8, "g", 22.0),
+            (0.4, "r", 19.0),
+            (1.2, "r", 21.0),
         ]
     )
     samples = g_minus_r_over_time(curve)
-    assert [sample.time_days for sample in samples] == pytest.approx([1.0, 2.0])
-    # At day 1, g is halfway from 20 to 22, so 21, and r is 19.
+    assert [sample.time_days for sample in samples] == pytest.approx([0.4, 0.8])
+    # At day 0.4, g is halfway from 20 to 22, so 21, and r is 19.
     assert samples[0].g_minus_r == pytest.approx(2.0)
-    # At day 2, g is 22, and r is halfway from 19 to 21, so 20.
+    # At day 0.8, g is 22, and r is halfway from 19 to 21, so 20.
     assert samples[1].g_minus_r == pytest.approx(2.0)
 
 
@@ -315,21 +348,22 @@ def test_one_noisy_first_color_does_not_flip_a_reddening_curve() -> None:
 def test_color_uncertainty_between_points_mixes_the_neighbors() -> None:
     """A color read between visits inherits the neighbors' uncertainties.
 
-    g is measured at day 0 and day 2, each with an error of 0.10. Halfway
+    g is measured at day 0 and day 1, each with an error of 0.10. Halfway
     between them the magnitude is an equal mix of the two, so each error
     is halved before they are combined. r is measured at that halfway
     time with an error of 0.20, and the color error combines g and r.
+    The g points are one day apart, which is still a usable gap.
     """
     curve = pd.DataFrame(
         {
-            "time_days": [0.0, 2.0, 1.0],
+            "time_days": [0.0, 1.0, 0.5],
             "filter": ["g", "g", "r"],
             "magnitude": [20.0, 22.0, 19.0],
             "magnitude_error": [0.10, 0.10, 0.20],
         }
     )
     samples = g_minus_r_over_time(curve)
-    assert [sample.time_days for sample in samples] == pytest.approx([1.0])
+    assert [sample.time_days for sample in samples] == pytest.approx([0.5])
     g_error = float(np.hypot(0.5 * 0.10, 0.5 * 0.10))
     assert samples[0].uncertainty == pytest.approx(float(np.hypot(g_error, 0.20)))
 

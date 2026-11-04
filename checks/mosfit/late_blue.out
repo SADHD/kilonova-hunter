@@ -1,0 +1,2 @@
+default 300 ratio to quad: [1.003  1.0103 1.0424 1.1784]  grid spacing near 7 d (d): [0.075 0.076 0.077 0.078 0.079]
+geom 20000 ratio to quad: [1.     1.0001 1.0003 1.0012]  grid spacing near 7 d (d): [0.006 0.006 0.006 0.006 0.006]

@@ -1,0 +1,74 @@
+{
+  "label": "ZTF proxy for Rubin",
+  "query": {
+    "endpoint": "https://api.ztf.fink-portal.org/api/v1/latests",
+    "method": "POST",
+    "parameters": {
+      "class": "Unknown",
+      "n": "1000",
+      "columns": "i:objectId,i:jd,i:fid,i:magpsf,i:sigmapsf,i:ra,i:dec",
+      "startdate": "one calendar day at a time, from the date range",
+      "stopdate": "the following calendar day"
+    }
+  },
+  "date_range": {
+    "start": "2024-06-01",
+    "stop": "2024-06-20"
+  },
+  "night_formula": "floor(MJD - 20/24). The index changes at 20:00 UTC, which is local noon at Palomar in Pacific Standard Time (UTC-8). The offset is fixed, so daylight saving does not split a night. MJD = JD - 2400000.5.",
+  "rubin_fake_night_formula": "floor(MJD - 0.5). The index changes at 12:00 UTC. Simulated fakes use this, not the ZTF formula.",
+  "split": "Nights sorted by the night index. Even positions are the tuning slice. Odd positions are the test slice. No night is in both.",
+  "note": "The public latests endpoint returns alerts Fink labeled Unknown, at most n=1000 per calendar day, not every ZTF alert from that night. Nights whose alert count is 1000 hit that cap and are truncated samples. TNS types are not in these columns. kilonova_hunter.tns.lookup_classifications is not implemented.",
+  "tuning": {
+    "nights": [
+      60461,
+      60463,
+      60466,
+      60468,
+      60470,
+      60472,
+      60474,
+      60476,
+      60478
+    ],
+    "n_nights": 9,
+    "n_alerts": 8022,
+    "alerts_per_night": {
+      "60461": 1000,
+      "60463": 1000,
+      "60466": 22,
+      "60468": 1000,
+      "60470": 1000,
+      "60472": 1000,
+      "60474": 1000,
+      "60476": 1000,
+      "60478": 1000
+    }
+  },
+  "test": {
+    "nights": [
+      60462,
+      60464,
+      60467,
+      60469,
+      60471,
+      60473,
+      60475,
+      60477,
+      60479
+    ],
+    "n_nights": 9,
+    "n_alerts": 8051,
+    "alerts_per_night": {
+      "60462": 1000,
+      "60464": 1000,
+      "60467": 1000,
+      "60469": 1000,
+      "60471": 1000,
+      "60473": 1000,
+      "60475": 1000,
+      "60477": 51,
+      "60479": 1000
+    }
+  }
+}

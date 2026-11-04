@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from kilonova_hunter.config import Thresholds, resolve_thresholds
+from kilonova_hunter.config import THRESHOLDS, Thresholds, resolve_thresholds
 
 # Columns every measurement reads. magnitude_error is not required:
 # the line fit uses the magnitudes themselves.
@@ -179,27 +179,34 @@ def fade_rates(
 def g_minus_r_at_time(
     light_curve: pd.DataFrame,
     time_days: float,
+    max_gap_days: float | None = None,
 ) -> ColorMeasurement:
     """Return g minus r at one time.
 
     If a band has a point at that time, that magnitude is used. If the
     time sits between two points, the magnitude is read off the straight
     line that joins them. That is linear interpolation: we do not invent
-    a curve, we only connect the neighbors. If the time is earlier than
-    the first point or later than the last, the result is ``None``,
-    because guessing past the data would invent a detection.
+    a curve, we only connect the neighbors. The neighbors have to be at
+    most ``max_gap_days`` apart. A wider gap is no data, the same as a
+    time earlier than the first point or later than the last. Guessing
+    past the data, or across a long hole, would invent a detection.
 
     Args:
         light_curve: One object, with the usual light-curve columns.
         time_days: When to read the color, in the same time unit as
             ``time_days`` on the table.
+        max_gap_days: Longest gap the straight line may cross. Omit this
+            to use ``THRESHOLDS.max_color_interpolation_gap_days``, which
+            is 1.0 day.
 
     Returns:
         The color, or ``None`` plus a "not enough data" sentence.
 
     Raises:
-        ValueError: If the table is missing a required column.
+        ValueError: If the table is missing a required column, or if
+            ``max_gap_days`` is not positive.
     """
+    gap_limit = _gap_limit(max_gap_days)
     _require_light_curve(light_curve)
     g_points = _usable_points(light_curve, "g")
     r_points = _usable_points(light_curve, "r")
@@ -210,16 +217,19 @@ def g_minus_r_at_time(
             explanation=_missing_band_sentence(g_points.empty, r_points.empty),
         )
 
-    g_magnitude = _magnitude_at_time(g_points, time_days)
-    r_magnitude = _magnitude_at_time(r_points, time_days)
+    g_magnitude, g_gap = _magnitude_at_time(g_points, time_days, gap_limit)
+    r_magnitude, r_gap = _magnitude_at_time(r_points, time_days, gap_limit)
     if g_magnitude is None or r_magnitude is None:
         return ColorMeasurement(
             g_minus_r=None,
             time_days=time_days,
-            explanation=_outside_coverage_sentence(
+            explanation=_color_missing_sentence(
                 time_days,
+                gap_limit,
                 g_points if g_magnitude is None else None,
                 r_points if r_magnitude is None else None,
+                g_gap if g_magnitude is None else None,
+                r_gap if r_magnitude is None else None,
             ),
         )
 
@@ -234,14 +244,18 @@ def g_minus_r_at_time(
     )
 
 
-def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
+def g_minus_r_over_time(
+    light_curve: pd.DataFrame,
+    max_gap_days: float | None = None,
+) -> list[ColorSample]:
     """Read g minus r at every time the data can support.
 
     The times we try are the times when g or r was observed. If the
     other band was not observed at that exact time, its magnitude is
-    read off the straight line between its neighbors. That is the same
+    read off the straight line between its neighbors, and only when
+    those neighbors are at most ``max_gap_days`` apart. That is the same
     reading ``g_minus_r_at_time`` already does. We do not invent extra
-    times between visits.
+    times between visits, and we do not draw a color across a longer gap.
 
     A time before the first point of either band, or after the last
     point, is left out. Extending the line past the data would invent
@@ -250,6 +264,8 @@ def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
 
     Args:
         light_curve: One object, with the usual light-curve columns.
+        max_gap_days: Longest gap the straight line may cross. Omit this
+            to use the 1.0-day limit on ``THRESHOLDS``.
 
     Returns:
         The colors, earliest first. Each one carries an uncertainty when
@@ -260,6 +276,7 @@ def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
     Raises:
         ValueError: If the table is missing a required column.
     """
+    gap_limit = _gap_limit(max_gap_days)
     _require_light_curve(light_curve)
     g_points = _usable_points(light_curve, "g")
     r_points = _usable_points(light_curve, "r")
@@ -270,7 +287,7 @@ def g_minus_r_over_time(light_curve: pd.DataFrame) -> list[ColorSample]:
     for time_days in _visit_times(g_points, r_points):
         # Ask the existing color helper. It returns None when this time
         # would need a guess past the first or last point of either band.
-        color = g_minus_r_at_time(light_curve, time_days)
+        color = g_minus_r_at_time(light_curve, time_days, max_gap_days=gap_limit)
         if color.g_minus_r is None:
             continue
         samples.append(
@@ -328,7 +345,10 @@ def g_minus_r_rise(
         ValueError: If the table is missing a required column.
     """
     settings = resolve_thresholds(thresholds)
-    samples = g_minus_r_over_time(light_curve)
+    samples = g_minus_r_over_time(
+        light_curve,
+        max_gap_days=settings.max_color_interpolation_gap_days,
+    )
     if len(samples) == 0:
         return ColorRise(
             rise=None,
@@ -581,10 +601,31 @@ def _fade_rate_for_one_band(
     )
 
 
-def _magnitude_at_time(points: pd.DataFrame, when_days: float) -> float | None:
-    """Read one band's magnitude at one time, or None if it is out of range.
+def _gap_limit(max_gap_days: float | None) -> float:
+    """The interpolation limit for this call, in days."""
+    if max_gap_days is None:
+        return THRESHOLDS.max_color_interpolation_gap_days
+    if max_gap_days <= 0:
+        raise ValueError(
+            f"max_gap_days must be a positive number of days, got {max_gap_days}."
+        )
+    return max_gap_days
+
+
+def _magnitude_at_time(
+    points: pd.DataFrame,
+    when_days: float,
+    max_gap_days: float,
+) -> tuple[float | None, float | None]:
+    """Read one band's magnitude at one time.
 
     ``points`` must already be the usable rows for a single band.
+    The first number is the magnitude, or ``None`` when the time is
+    outside the data or the neighbors are more than ``max_gap_days``
+    apart. The second number is the gap that was crossed, in days, or
+    ``None`` when the visit is exact or the time is outside the data.
+    A gap that is too long still comes back, so the caller can say why
+    the magnitude is missing.
     """
     ordered = points.sort_values("time_days")
     times = [float(value) for value in ordered["time_days"]]
@@ -592,10 +633,10 @@ def _magnitude_at_time(points: pd.DataFrame, when_days: float) -> float | None:
 
     for time_days, magnitude in zip(times, magnitudes, strict=True):
         if abs(time_days - when_days) <= _SAME_VISIT_DAYS:
-            return magnitude
+            return magnitude, None
 
     if when_days < times[0] or when_days > times[-1]:
-        return None
+        return None, None
 
     earlier_time = times[0]
     earlier_magnitude = magnitudes[0]
@@ -611,10 +652,13 @@ def _magnitude_at_time(points: pd.DataFrame, when_days: float) -> float | None:
 
     gap = later_time - earlier_time
     if gap <= _SAME_VISIT_DAYS:
-        return earlier_magnitude
+        return earlier_magnitude, None
+    if gap > max_gap_days:
+        return None, gap
     # 0 means "at the earlier point", 1 means "at the later point".
     fraction = (when_days - earlier_time) / gap
-    return earlier_magnitude + fraction * (later_magnitude - earlier_magnitude)
+    magnitude = earlier_magnitude + fraction * (later_magnitude - earlier_magnitude)
+    return magnitude, gap
 
 
 def _color_uncertainty(
@@ -857,6 +901,30 @@ def _missing_band_sentence(g_missing: bool, r_missing: bool) -> str:
         "Not enough data: g minus r needs both a g point and an r point, "
         f"and this curve has no {which} points."
     )
+
+
+def _color_missing_sentence(
+    time_days: float,
+    max_gap_days: float,
+    g_points: pd.DataFrame | None,
+    r_points: pd.DataFrame | None,
+    g_gap: float | None,
+    r_gap: float | None,
+) -> str:
+    """Explain a missing color: a long gap, or a time outside the data."""
+    wide: list[str] = []
+    if g_gap is not None and g_gap > max_gap_days:
+        wide.append(f"g points {g_gap:.2f} days apart")
+    if r_gap is not None and r_gap > max_gap_days:
+        wide.append(f"r points {r_gap:.2f} days apart")
+    if wide:
+        joined = " and ".join(wide)
+        return (
+            f"Not enough data: g minus r was needed at day {time_days:.2f}, "
+            f"but the {joined}. A color is not read across a gap longer "
+            f"than {max_gap_days:.1f} days, so this is no data."
+        )
+    return _outside_coverage_sentence(time_days, g_points, r_points)
 
 
 def _outside_coverage_sentence(

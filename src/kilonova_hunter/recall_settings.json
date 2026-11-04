@@ -1,0 +1,20 @@
+{
+  "recall_gap": 0.05,
+  "pass_lower_bound": 0.70,
+  "max_flags_per_night": 10,
+  "reference_population": "2017-like",
+  "reference_split": "tuning",
+  "reference_day": 3,
+  "strictness": [
+    {"parameter": "redder_than_g_minus_r", "higher_is_stricter": true},
+    {"parameter": "min_g_minus_r_rise", "higher_is_stricter": true},
+    {"parameter": "min_color_separation_days", "higher_is_stricter": true},
+    {"parameter": "reddening_window_days", "higher_is_stricter": false}
+  ],
+  "grid": {
+    "redder_than_g_minus_r": [0.0, 0.2, 0.4, 0.6],
+    "min_g_minus_r_rise": [0.1, 0.2, 0.3],
+    "reddening_window_days": [2.0, 3.0, 5.0],
+    "min_color_separation_days": [0.5, 1.0]
+  }
+}
