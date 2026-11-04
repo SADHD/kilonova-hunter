@@ -2371,22 +2371,28 @@ def test_fetch_uses_frozen_nights(variant, tmp_path, monkeypatch, capsys):
         "--alert-stop",
         "2024-06-20",
     ]
-    if variant == "unknown":
-        with pytest.raises(SystemExit) as caught:
-            main(argv)
-        assert caught.value.code == 1
-        assert list(output.iterdir()) == [local_split]
-    else:
-        main(argv)
-        kept = pd.read_csv(output / "ztf_proxy_alerts_tuning.csv")
-        assert set(kept["night"]) == set(split["tuning"]["nights"]) - {60461}
-        assert not set(kept["night"]) & set(split["test"]["nights"])
-        summary = (output / "real_alert_slices_fetched.json").read_text()
-        printed = capsys.readouterr()
-        assert '"test"' not in summary
-        assert "Test:" not in printed.out
-        for night in split["test"]["nights"]:
-            assert str(night) not in summary + printed.out + printed.err
+    main(argv)
+    kept = pd.read_csv(output / "ztf_proxy_alerts_tuning.csv")
+    expected = set(split["tuning"]["nights"])
+    missing = [] if variant == "unknown" else [60461]
+    assert set(kept["night"]) == expected - set(missing)
+    assert set(kept["night_slice"]) == {"tuning"}
+    assert not set(kept["night"]) & set(split["test"]["nights"])
+    assert 99999 not in set(kept["night"])
+    summary = (output / "real_alert_slices_fetched.json").read_text()
+    report = json.loads(summary)["fetch_report"]
+    printed = capsys.readouterr()
+    assert report["missing_tuning_nights"] == missing
+    assert f"Missing frozen tuning nights: {missing}" in printed.err
+    dropped = 1 if variant == "unknown" else 0
+    unknown = [99999] if variant == "unknown" else []
+    assert report["dropped_unknown_rows"] == dropped
+    assert report["dropped_unknown_nights"] == unknown
+    assert f"Dropped unknown-night rows: {dropped}; nights: {unknown}" in printed.err
+    assert '"test"' not in summary
+    assert "Test:" not in printed.out
+    for night in split["test"]["nights"]:
+        assert str(night) not in summary + printed.out + printed.err
     assert frozen.read_bytes() == before
     assert local_split.read_bytes() == before
 

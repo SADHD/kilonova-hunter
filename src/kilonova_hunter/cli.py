@@ -408,10 +408,20 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
     if fetched.empty:
         _fail("Fink returned no alerts for that date range.")
     # Label, then drop the other nights, before any write or print.
+    fetch_report = {}
     try:
-        labeled = label_night_slices(fetched)
+        labeled = label_night_slices(fetched, fetch_report=fetch_report)
     except ValueError as error:
         _fail(f"{error} Nothing was written.")
+    print(
+        f"Dropped unknown-night rows: {fetch_report['dropped_unknown_rows']}; "
+        f"nights: {fetch_report['dropped_unknown_nights']}",
+        file=sys.stderr,
+    )
+    print(
+        f"Missing frozen tuning nights: {fetch_report['missing_tuning_nights']}",
+        file=sys.stderr,
+    )
     tuning_rows = tuning_only_alerts(labeled)
     if tuning_rows.empty:
         _fail("Fink returned no tuning-night alerts for that date range.")
@@ -428,6 +438,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
             start=start_day,
             stop=stop_day,
         )
+    document["fetch_report"] = fetch_report
     path = output / "real_alert_slices_fetched.json"
     write_slice_document(document, path)
     tuning_path = output / TUNING_ALERTS_FILENAME

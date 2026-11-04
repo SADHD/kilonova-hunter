@@ -157,7 +157,9 @@ FROZEN_SPLIT_PATH = (
 )
 
 
-def label_night_slices(alerts: pd.DataFrame) -> pd.DataFrame:
+def label_night_slices(
+    alerts: pd.DataFrame, *, fetch_report: dict | None = None
+) -> pd.DataFrame:
     """Label against the committed split, never against the fetched night order."""
     try:
         document = json.loads(FROZEN_SPLIT_PATH.read_text(encoding="utf-8"))
@@ -171,8 +173,16 @@ def label_night_slices(alerts: pd.DataFrame) -> pd.DataFrame:
         ) from error
     labeled = alerts.copy()
     unknown = set(labeled["night"]) - tuning - test
-    if unknown:
-        raise ValueError("Fetched nights are outside the committed frozen split.")
+    unknown_rows = labeled["night"].isin(unknown)
+    if fetch_report is not None:
+        fetch_report.update(
+            dropped_unknown_rows=int(unknown_rows.sum()),
+            dropped_unknown_nights=sorted(int(n) for n in unknown),
+            missing_tuning_nights=sorted(
+                int(n) for n in tuning - set(labeled["night"])
+            ),
+        )
+    labeled = labeled.loc[~unknown_rows].copy()
     labeled[NIGHT_SLICE_COLUMN] = "tuning"
     labeled.loc[labeled["night"].isin(test), NIGHT_SLICE_COLUMN] = "test"
     return labeled
