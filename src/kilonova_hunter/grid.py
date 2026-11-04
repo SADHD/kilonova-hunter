@@ -44,7 +44,7 @@ import numpy as np
 import pandas as pd
 
 from kilonova_hunter.config import THRESHOLDS, Thresholds
-from kilonova_hunter.features import g_minus_r_at_time, g_minus_r_rise, peak_time_days
+from kilonova_hunter.features import g_minus_r_rise
 from kilonova_hunter.filter import evaluate_fade_rule, is_kilonova_candidate
 from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
 from kilonova_hunter.model_grid import (
@@ -348,6 +348,7 @@ class PreparedFake:
     # Official definition (a) is ``judgeable``. This is candidate (b).
     # It is not official until Sage approves it.
     judgeable_candidate: bool = False
+    fade_skipped: bool = False
 
 
 def _without_exact_copies(events: pd.DataFrame) -> pd.DataFrame:
@@ -371,15 +372,9 @@ def _curves_by_id(curves: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 def _color_value(visible: pd.DataFrame) -> float | None:
     """g minus r at the color-rule time, or None when it cannot be read."""
-    peak = peak_time_days(visible, "r")
-    if peak is None:
-        return None
-    color = g_minus_r_at_time(
-        visible,
-        peak + THRESHOLDS.color_days_after_peak,
-        max_gap_days=THRESHOLDS.max_color_interpolation_gap_days,
-    )
-    return color.g_minus_r
+    from kilonova_hunter.features import latest_same_night_color
+
+    return latest_same_night_color(visible).g_minus_r
 
 
 def _rise_or_skip(visible: pd.DataFrame, window: float, gap: float) -> float | None:
@@ -413,6 +408,8 @@ def prepare_fakes(
     curves: pd.DataFrame,
     day: float,
     settings: dict | None = None,
+    *,
+    new_fade: bool = False,
 ) -> list[PreparedFake]:
     """Measure each fake once, using only rows at or before ``day``."""
     spec = load_settings() if settings is None else settings
@@ -447,6 +444,7 @@ def prepare_fakes(
             False if failed else is_candidate_judgeable(curve, day, merger_mjd=merger)
         )
         visible = light_curve_for_the_filter(curve, day)
+        visible.attrs["merger_mjd"] = float(row.merger_mjd)
         if failed or visible.empty:
             prepared.append(
                 PreparedFake(
@@ -461,7 +459,12 @@ def prepare_fakes(
                 )
             )
             continue
-        fade_passed = evaluate_fade_rule(visible).passed is True
+        from dataclasses import replace
+
+        fade_result = evaluate_fade_rule(
+            visible, replace(THRESHOLDS, fade_requires_two_after_peak=new_fade)
+        )
+        fade_passed = fade_result.passed is not False
         color_value = _color_value(visible)
         rises = {pair: _rise_or_skip(visible, pair[0], pair[1]) for pair in windows}
         prepared.append(
@@ -472,6 +475,7 @@ def prepare_fakes(
                 judgeable_candidate=candidate,
                 model_failed=failed,
                 fade_passed=fade_passed,
+                fade_skipped=fade_result.passed is None,
                 color_value=color_value,
                 rises=rises,
             )
@@ -714,8 +718,7 @@ def format_color_sensitivity_scope(
         "## Color sensitivity",
         "",
         "Placeholder cuts. Each line shifts g-r bluer and reports "
-        "recall (a), the official judgeable rule, and recall (b), "
-        "which also needs a usable g-r at r-peak + 1 day. "
+        "recall (a), the official judgeable rule. "
         "This is not used to pick a cut.",
         "",
     ]
@@ -737,8 +740,7 @@ def format_color_sensitivity_scope(
                 lines.append(
                     f"{population} day {float(day):g}, "
                     f"g-r bluer by +{float(shift):.1f} mag: "
-                    f"recall (a) {_percent(scored['recall_judgeable'])}, "
-                    f"recall (b) {_percent(scored['recall_candidate'])}."
+                    f"recall (a) {_percent(scored['recall_judgeable'])}."
                 )
             if uses_two_component_model(population) and float(day) >= 7.0:
                 lines.append(REALISTIC_DAY7_LABEL)
@@ -868,7 +870,7 @@ def format_informational_counts(
         "## Informational counts",
         "",
         "These counts are not used to tune or to pick a cut. "
-        "Recall (a) and (b) use the placeholder cuts in config.py. "
+        "Recall (a) uses the placeholder cuts in config.py. "
         "(ii) is the share with any g and r points at most 1.0 day apart. "
         "(iii) is the share with two same-band points at least 0.5 days "
         "apart after the r-band peak. The band lines are that band alone.",
@@ -901,8 +903,7 @@ def format_informational_counts(
 
             lines.append(
                 f"{population} day {day:g}: "
-                f"recall (a) {_percent(scored['recall_judgeable'])}, "
-                f"recall (b) {_percent(scored['recall_candidate'])}. "
+                f"recall (a) {_percent(scored['recall_judgeable'])}. "
                 f"(ii) g-r pair {_percent(shares['g_minus_r_pair'])}. "
                 f"(iii) any band {_percent(shares['after_r_peak_any'])} "
                 f"(g {_percent(shares['after_r_peak_g'])}, "
@@ -974,6 +975,21 @@ def score_prepared(
         "status": status,
         "untestable": untestable,
         "n_reddening_skipped": skipped,
+        "n_fade_skipped": sum(fake.fade_skipped for fake in chosen),
+        "n_fade_skipped_judgeable": sum(
+            fake.fade_skipped and fake.judgeable for fake in chosen
+        ),
+        "n_reddening_skipped_judgeable": sum(
+            fake.judgeable
+            and fake.rises.get(
+                (
+                    float(combo["reddening_window_days"]),
+                    float(combo["min_color_separation_days"]),
+                )
+            )
+            is None
+            for fake in chosen
+        ),
         "n_judgeable_candidate": judgeable_candidate,
         "n_caught_and_candidate": candidate_caught,
         "recall_candidate": (
@@ -1120,6 +1136,7 @@ def score_exact_copies(
         if candidate:
             n_candidate += 1
         visible = light_curve_for_the_filter(curve, day)
+        visible.attrs["merger_mjd"] = float(row.merger_mjd)
         verdict = is_kilonova_candidate(visible, settings)
         if verdict.is_candidate:
             n_caught += 1
@@ -1246,6 +1263,7 @@ def exact_copy_rule_breakdown(
         if candidate:
             n_candidate += 1
         visible = light_curve_for_the_filter(curve, day)
+        visible.attrs["merger_mjd"] = float(row.merger_mjd)
         verdict = is_kilonova_candidate(visible, settings)
         reddening = _rule_word(verdict.reddening.passed)
         if reddening == "skipped":
@@ -1286,22 +1304,14 @@ def exact_copy_rule_breakdown(
 
 def _color_next_to_cut(visible: pd.DataFrame) -> str:
     """g minus r at r peak + 1 day, or why that color is not usable."""
-    peak = peak_time_days(visible, "r")
-    cut = THRESHOLDS.redder_than_g_minus_r
-    limit = THRESHOLDS.max_color_interpolation_gap_days
-    if peak is None:
-        return "no usable g-r: no r-band peak"
-    when = float(peak) + THRESHOLDS.color_days_after_peak
-    color = g_minus_r_at_time(visible, when, max_gap_days=limit)
-    if color.g_minus_r is not None:
-        flag = ""
-        if color.g_minus_r <= 0.0:
-            flag = " AT OR BELOW 0.0: Science Lead rechecks the 0.0-0.6 grid."
-        return f"g-r {color.g_minus_r:.2f} next to cut {cut:.2f}.{flag}"
-    gap = _widest_bracket_gap(visible, when)
-    if gap is not None and gap > limit:
-        return f"no usable g-r: gap {gap:.2f} d > {limit:.1f} d"
-    return f"no usable g-r: {color.explanation}"
+    from kilonova_hunter.features import latest_same_night_color
+
+    color = latest_same_night_color(visible)
+    if color.g_minus_r is None:
+        return color.explanation
+    return (
+        f"g-r {color.g_minus_r:.2f} next to cut {THRESHOLDS.redder_than_g_minus_r:.2f}."
+    )
 
 
 def _widest_bracket_gap(visible: pd.DataFrame, when: float) -> float | None:
@@ -1431,12 +1441,7 @@ def format_test_score(
         lines.append("")
     lines.append("Passing on ZTF does not mean passing on Rubin.")
     lines.append(TNS_STATUS_LINE)
-    lines.append(
-        "Judgeable (a) is the official section 1 rule. "
-        "Judgeable (b) also needs a usable g minus r at r-peak + 1 day, "
-        "using the 1.0-day interpolation limit. (b) is not official. "
-        "Sage has to approve it before it can replace (a)."
-    )
+    lines.append("Judgeable (a) is unchanged. Decision 12(22) drops (b).")
     lines.append(EARLY_GAP_MODEL_LIMIT)
     lines.append("")
     lines.append(
@@ -1474,6 +1479,9 @@ def write_grid_csv(rows: list[dict], path: Path) -> None:
     """Write the grid table. Rates that were left blank stay blank."""
     path.parent.mkdir(parents=True, exist_ok=True)
     frame = pd.DataFrame(rows)
+    frame = frame.drop(
+        columns=[name for name in frame if "candidate" in name], errors="ignore"
+    )
     frame.to_csv(path, index=False)
 
 
@@ -1497,10 +1505,7 @@ def summarize_grid(
         "The catch rate is caught divided by every fake. "
         "That is the survey-level number.",
         "",
-        "Judgeable (a) is the official section 1 rule. "
-        "Judgeable (b) also needs a usable g minus r at r-peak + 1 day, "
-        "using the 1.0-day interpolation limit. (b) is not official. "
-        "Sage has to approve it before it can replace (a).",
+        "Judgeable (a) is unchanged. Decision 12(22) drops (b).",
         EARLY_GAP_MODEL_LIMIT,
         "",
         TNS_STATUS_LINE,
@@ -1637,6 +1642,8 @@ def run_tuning_grid(
     workers: int = 1,
     settings_path: Path | None = None,
     splits: tuple[str, ...] | None = None,
+    new_fade: bool = False,
+    copy_seed: int = 2026110401,
 ) -> GridRun:
     """Simulate both populations and the given splits, then score tuning.
 
@@ -1678,7 +1685,9 @@ def run_tuning_grid(
             if split != "tuning":
                 continue
             prepared = {
-                day: prepare_fakes(sample.events, sample.light_curves, day, settings)
+                day: prepare_fakes(
+                    sample.events, sample.light_curves, day, settings, new_fade=new_fade
+                )
                 for day in JUDGE_DAYS
             }
             rows.extend(
@@ -1690,14 +1699,20 @@ def run_tuning_grid(
                 )
             )
             prepared_for_examples[population] = (prepared, sample.light_curves)
-    copies = simulate_exact_copies(dust=dust, cache_dir=cache_dir, workers=workers)
+    copies = simulate_exact_copies(
+        dust=dust, cache_dir=cache_dir, workers=workers, seed=copy_seed
+    )
     placeholder = {
         "redder_than_g_minus_r": THRESHOLDS.redder_than_g_minus_r,
         "min_g_minus_r_rise": THRESHOLDS.min_g_minus_r_rise,
         "reddening_window_days": THRESHOLDS.reddening_window_days,
         "min_color_separation_days": THRESHOLDS.min_color_separation_days,
     }
-    copy_score = score_exact_copies(copies.events, copies.light_curves, placeholder)
+    copy_score = score_exact_copies(
+        copies.events,
+        copies.light_curves,
+        dict(placeholder, fade_requires_two_after_peak=new_fade),
+    )
     # The default draw stops on definition (a). A later caller that
     # stops on (b) must say so, or (b) is only indicative.
     copy_score["stopping_definition"] = "a"
@@ -1858,13 +1873,9 @@ def _judgeable_clause(row: dict) -> str:
     g minus r at the r-band peak plus 1 day, with the 1.0-day gap limit.
     (b) is not official. Sage has to approve it first.
     """
-    if "n_judgeable_candidate" not in row:
+    if "n_judgeable" not in row:
         return ""
-    return (
-        f" Judgeable (a, official): {row['n_judgeable']}. "
-        "Judgeable (b, candidate, needs Sage's approval): "
-        f"{row['n_judgeable_candidate']}."
-    )
+    return f" Judgeable (a, official): {row['n_judgeable']}."
 
 
 def _power_clause(value: float) -> str:
@@ -1915,11 +1926,6 @@ def _copy_lines(copies: dict) -> list[str]:
     official = copies.get("official") or sanity_copy_verdict(
         int(copies["n_judgeable"]), int(copies["n_caught_judgeable"])
     )
-    candidate = copies.get("candidate") or sanity_copy_verdict(
-        int(copies.get("n_judgeable_candidate", 0)),
-        int(copies.get("n_caught_candidate", 0)),
-    )
-    stopping = str(copies.get("stopping_definition", "a"))
     lines = [
         "",
         "## Exact AT2017gfo copies",
@@ -1927,11 +1933,10 @@ def _copy_lines(copies: dict) -> list[str]:
         "These copies are not in the recall or the catch rate. "
         "The fractions below use the placeholder cuts in config.py, "
         "not a cut picked from the grid. "
-        "Definition (a) is official. Definition (b) needs Sage's approval. "
-        "12(16) is proposed: keep drawing until 50 are judgeable, cap 4,000.",
+        "Definition (a) is official; (b) was dropped by Decision 12(22). "
+        "12(16) is approved: keep drawing until 50 are judgeable, cap 4,000.",
         "",
         _sanity_line("a, official", official, int(copies["n_copies"])),
-        _candidate_line(candidate, int(copies["n_copies"]), stopping),
     ]
     if copies["misses"]:
         lines.append("")

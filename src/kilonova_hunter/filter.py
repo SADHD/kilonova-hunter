@@ -41,9 +41,8 @@ from kilonova_hunter.features import (
     ColorRise,
     _format_mag,
     fade_rates,
-    g_minus_r_at_time,
     g_minus_r_rise,
-    peak_time_days,
+    latest_same_night_color,
 )
 
 # The fade cut lives in config.py so there is one place to change it.
@@ -167,9 +166,10 @@ def evaluate_fade_rule(
     if fastest_rate is None:
         bands = _or_list(settings.fade_bands)
         return RuleResult(
-            passed=False,
+            passed=None if settings.fade_requires_two_after_peak else False,
             explanation=(
-                "Not enough data to measure a fade: a fit needs at least "
+                ("Skipped: " if settings.fade_requires_two_after_peak else "")
+                + "Not enough data to measure a fade: a fit needs at least "
                 f"{settings.min_points_per_band} points after the peak in "
                 f"{bands}, and none of those bands has that many."
             ),
@@ -199,12 +199,12 @@ def evaluate_color_rule(
     light_curve: pd.DataFrame,
     thresholds: Thresholds | None = None,
 ) -> RuleResult:
-    """Apply the red-color rule to one light curve.
+    """Apply the red-color rule to the latest same-night detection pair.
 
-    The color is g minus r, read ``color_days_after_peak`` after the
-    brightest r-band point. r is the clock because g minus r is a
-    comparison against r, and g often peaks earlier. The rule passes
-    when that color is strictly redder than the cut.
+    Decision: option (ii), Sage Nov 4 2026; reverses 12(3).
+    Callers truncate to D first. Absolute Rubin merger time is supplied
+    in attrs; ZTF curves carry their own night column. Reddening retains
+    its separate interpolated sampling. The cut is unchanged.
 
     Args:
         light_curve: One object, with the usual light-curve columns.
@@ -215,29 +215,14 @@ def evaluate_color_rule(
         Whether the color rule passed, and one sentence explaining it.
     """
     settings = resolve_thresholds(thresholds)
-    peak_time = peak_time_days(light_curve, "r")
-    if peak_time is None:
-        return RuleResult(
-            passed=False,
-            explanation=(
-                "Not enough data: g minus r needs r-band points to mark "
-                "the peak, and this curve has none."
-            ),
-        )
-
-    when = peak_time + settings.color_days_after_peak
-    color = g_minus_r_at_time(
-        light_curve,
-        when,
-        max_gap_days=settings.max_color_interpolation_gap_days,
-    )
+    color = latest_same_night_color(light_curve)
     if color.g_minus_r is None:
         return RuleResult(passed=False, explanation=color.explanation)
 
     cut = settings.redder_than_g_minus_r
     color_text = f"{color.g_minus_r:.2f}"
     cut_text = f"{cut:.2f}"
-    when_text = _after_peak_phrase(settings.color_days_after_peak)
+    when_text = "At the latest same-night g+r pair"
     if color.g_minus_r > cut:
         return RuleResult(
             passed=True,
