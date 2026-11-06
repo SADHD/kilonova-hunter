@@ -90,16 +90,42 @@ def synthetic_process_main():
     from pathlib import Path
 
     parser = argparse.ArgumentParser(description="SYNTHETIC ONLY: no held data")
-    parser.add_argument("--scenario", choices=("stale", "hard-fail"), required=True)
+    parser.add_argument(
+        "--scenario", choices=("stale", "hard-fail", "error"), required=True
+    )
     parser.add_argument("--artifact-root", type=Path, required=True)
     options = parser.parse_args()
     root = options.artifact_root.resolve()
     root.mkdir(parents=True, exist_ok=False)
     with pytest.MonkeyPatch.context() as patch:
+        import socket
+
+        def no_network(*a, **k):
+            raise AssertionError("Synthetic dry run must not use network")
+
+        patch.setattr(socket.socket, "connect", no_network)
+        patch.setattr(socket.socket, "connect_ex", no_network)
         patch.setattr(cli, "test_set_scored_path", lambda: root / "ledger.json")
         args, folders, _ = harness.__wrapped__(root, patch)
         if options.scenario == "stale":
             (folders[0] / "score_provenance.json").unlink()
+        elif options.scenario == "error":
+
+            def forced_error(*a, **k):
+                if k["population"] == "realistic":
+                    raise RuntimeError("SYNTHETIC evaluator exception")
+                return [
+                    {
+                        "day": day,
+                        "n_total": 1,
+                        "n_judgeable": 1,
+                        "n_caught": 0,
+                        "n_caught_not_judgeable": 0,
+                    }
+                    for day in (3.0, 5.0, 7.0)
+                ]
+
+            patch.setattr(grid, "score_with_frozen_cuts", forced_error)
         else:
             original = grid.score_with_frozen_cuts
 
@@ -121,6 +147,26 @@ def synthetic_process_main():
             )
         try:
             cli._run_score_test(args)
+        except RuntimeError:
+            if options.scenario != "error":
+                raise
+            result = entry()
+            assert result["status"] == "ERROR" and result["consumed"] is True
+            assert result["exception"] == {
+                "type": "RuntimeError",
+                "message": "SYNTHETIC evaluator exception",
+            }
+            assert result["numbers"]["realistic"] == [
+                {"day": day, "result": None} for day in (3.0, 5.0, 7.0)
+            ]
+            assert result["numbers"]["2017-like"][0]["n_caught_not_judgeable"] == 0
+            saved = cli.test_set_scored_path().read_bytes()
+            with pytest.raises(SystemExit) as retry:
+                cli._run_score_test(args)
+            assert retry.value.code == 1
+            assert cli.test_set_scored_path().read_bytes() == saved
+            print("SYNTHETIC retry: exit=1; refused; ledger unchanged")
+            raise
         finally:
             if cli.test_set_scored_path().exists():
                 print("SYNTHETIC ledger entry:")

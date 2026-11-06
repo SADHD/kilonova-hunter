@@ -697,7 +697,7 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
     marker = tmp_path / "test_set_scored.json"
     pending = json.loads(marker.read_text(encoding="utf-8"))
     entry = next(iter(pending["sets"].values()))[0]
-    assert entry["status"] == "FAIL"
+    assert entry["status"] == "ERROR"
     assert entry["object_ids"]["2017-like"] == ["2017-like-1"]
     assert "score_sha256" not in entry
     claim = next((tmp_path / "test_set_claims").iterdir())
@@ -728,7 +728,7 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
     assert caught.value.code == 1
     assert "scored once" in capsys.readouterr().err
     assert marker.read_text(encoding="utf-8") == saved
-    assert entry["status"] == "FAIL"
+    assert entry["status"] == "ERROR"
 
 
 def test_two_concurrent_score_runs_let_one_through(
@@ -1499,7 +1499,7 @@ def test_a_crash_after_the_score_file_keeps_the_pending_ids_blocked(
     saved = _ledger_text(scored_test_set_ledger)
     pending = json.loads(saved)
     old_hash, old_entries = next(iter(pending["sets"].items()))
-    assert old_entries[0]["status"] == "FAIL"
+    assert old_entries[0]["status"] == "ERROR"
     assert "score_sha256" not in old_entries[0]
     assert not (tmp_path / "test_set_scored.json.lock").exists()
 
@@ -1554,7 +1554,7 @@ def test_a_crash_after_the_score_file_keeps_the_pending_ids_blocked(
     )
     again = json.loads(_ledger_text(scored_test_set_ledger))
     assert again["sets"][old_hash][0] == old_entries[0]
-    assert again["sets"][old_hash][0]["status"] == "FAIL"
+    assert again["sets"][old_hash][0]["status"] == "ERROR"
     new_entries = next(
         entries for key, entries in again["sets"].items() if key != old_hash
     )
