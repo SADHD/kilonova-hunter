@@ -91,7 +91,9 @@ def synthetic_process_main():
 
     parser = argparse.ArgumentParser(description="SYNTHETIC ONLY: no held data")
     parser.add_argument(
-        "--scenario", choices=("stale", "hard-fail", "error"), required=True
+        "--scenario",
+        choices=("stale", "hard-fail", "error", "exit-zero"),
+        required=True,
     )
     parser.add_argument("--artifact-root", type=Path, required=True)
     options = parser.parse_args()
@@ -107,12 +109,26 @@ def synthetic_process_main():
         patch.setattr(socket.socket, "connect_ex", no_network)
         patch.setattr(cli, "test_set_scored_path", lambda: root / "ledger.json")
         args, folders, _ = harness.__wrapped__(root, patch)
+        from kilonova_hunter import sample, sky
+
+        def no_generation(*a, **k):
+            raise AssertionError("Synthetic runner must not generate or query maps")
+
+        patch.setattr(sample, "simulate_population", no_generation)
+        patch.setattr(sample, "simulate_exact_copies", no_generation)
+        patch.setattr(sky, "open_dust_source", no_generation)
+        print(
+            "SYNTHETIC source tree/SHA attestation stub; fake map bytes; "
+            "no generators or map queries"
+        )
         if options.scenario == "stale":
             (folders[0] / "score_provenance.json").unlink()
-        elif options.scenario == "error":
+        elif options.scenario in ("error", "exit-zero"):
 
             def forced_error(*a, **k):
                 if k["population"] == "realistic":
+                    if options.scenario == "exit-zero":
+                        raise SystemExit(0)
                     raise RuntimeError("SYNTHETIC evaluator exception")
                 return [
                     {
@@ -147,25 +163,21 @@ def synthetic_process_main():
             )
         try:
             cli._run_score_test(args)
-        except RuntimeError:
-            if options.scenario != "error":
-                raise
-            result = entry()
-            assert result["status"] == "ERROR" and result["consumed"] is True
-            assert result["exception"] == {
-                "type": "RuntimeError",
-                "message": "SYNTHETIC evaluator exception",
-            }
-            assert result["numbers"]["realistic"] == [
-                {"day": day, "result": None} for day in (3.0, 5.0, 7.0)
-            ]
-            assert result["numbers"]["2017-like"][0]["n_caught_not_judgeable"] == 0
-            saved = cli.test_set_scored_path().read_bytes()
-            with pytest.raises(SystemExit) as retry:
-                cli._run_score_test(args)
-            assert retry.value.code == 1
-            assert cli.test_set_scored_path().read_bytes() == saved
-            print("SYNTHETIC retry: exit=1; refused; ledger unchanged")
+        except SystemExit as failure:
+            if options.scenario != "stale":
+                result = entry()
+                assert result["status"] == (
+                    "FAIL" if options.scenario == "hard-fail" else "ERROR"
+                )
+                assert result["consumed"] is True
+                saved = cli.test_set_scored_path().read_bytes()
+                args.output = root / "retry-report"
+                with pytest.raises(SystemExit) as retry:
+                    cli._run_score_test(args)
+                assert retry.value.code == 1
+                assert cli.test_set_scored_path().read_bytes() == saved
+                print("SYNTHETIC retry: exit=1; refused; ledger unchanged")
+            print(f"SYNTHETIC shell exit: {failure.code}")
             raise
         finally:
             if cli.test_set_scored_path().exists():

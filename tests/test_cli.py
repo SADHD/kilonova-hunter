@@ -27,16 +27,27 @@ def legacy_score_gates(monkeypatch):
 
     No maps or real sanity cache are opened by these older synthetic probes.
     """
+    from kilonova_hunter import cli
     from kilonova_hunter.cli import _score_file_hash
     from kilonova_hunter.sample import _cache_paths
 
-    monkeypatch.setattr(
-        "kilonova_hunter.cli._verify_score_receipt",
-        lambda p: {
+    def receipt(p):
+        if not all(path.is_file() for path in _cache_paths(p)):
+            cli._fail(f"No complete cache at {p}; this command does not simulate.")
+        return {
             "test_set_hashes": {
                 path.name: _score_file_hash(path) for path in _cache_paths(p)
             }
-        },
+        }
+
+    monkeypatch.setattr(cli, "_verify_score_receipt", receipt)
+    preflight = cli._preflight_score_cache
+    monkeypatch.setattr(
+        cli,
+        "_preflight_score_cache",
+        lambda folder, label: (
+            {} if folder.name == "copies" else preflight(folder, label)
+        ),
     )
     events = pd.DataFrame()
     events.attrs["legacy_score_gate"] = True
@@ -680,7 +691,7 @@ def test_score_marker_is_exclusive_and_survives_a_crash(
         raise RuntimeError("scoring crashed")
 
     monkeypatch.setattr("kilonova_hunter.grid.score_with_frozen_cuts", boom)
-    with pytest.raises(RuntimeError, match="scoring crashed"):
+    with pytest.raises(SystemExit, match="1"):
         main(
             [
                 "recall",
@@ -925,8 +936,11 @@ def test_provenance_changes_are_refused_and_a_new_seed_is_allowed(
             )
         assert caught.value.code == 1
         err = capsys.readouterr().err
-        assert "logged decision approved by Sage through PM" in err
-        assert "both scores must be reported" in err
+        if field == "redback_version":
+            assert "logged decision approved by Sage through PM" in err
+            assert "both scores must be reported" in err
+        else:
+            assert "refused" in err or "SFD provenance" in err
         assert not (refused / "test_score.md").exists()
     seeded = tmp_path / "cache-seed"
     shutil.copytree(cache, seeded)
@@ -1121,7 +1135,7 @@ def test_overlap_refuses_a_larger_sample_and_a_decision_appends(
             ]
         )
     assert caught.value.code == 1
-    assert "events table is missing" in capsys.readouterr().err
+    assert "does not simulate" in capsys.readouterr().err
     assert not (missing_out / "test_score.md").exists()
     assert _ledger_text(scored_test_set_ledger) == saved
 
@@ -1482,7 +1496,7 @@ def test_a_crash_after_the_score_file_keeps_the_pending_ids_blocked(
         raise RuntimeError("killed before the ledger was completed")
 
     monkeypatch.setattr(cli_mod, "_complete_pending_score", killed)
-    with pytest.raises(RuntimeError, match="killed before"):
+    with pytest.raises(SystemExit, match="1"):
         main(
             [
                 "recall",

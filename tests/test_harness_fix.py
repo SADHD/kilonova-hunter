@@ -53,6 +53,7 @@ def synthetic_cache(folder, population):
 def harness(tmp_path, monkeypatch):
     # Generator is a synthetic stub in this fixture; no production build claim.
     monkeypatch.setattr(cli, "_score_generator_sha", cli._git_sha)
+    monkeypatch.setattr(cli, "_score_source_tree", lambda sha: "synthetic-source-tree")
     maps = tmp_path / "synthetic_maps"
     maps.mkdir()
     for pole in ("ngp", "sgp"):
@@ -150,7 +151,7 @@ def test_stale_or_modified_cache_refused(harness, target, capsys):
             path.unlink()
         else:
             payload = json.loads(path.read_text())
-            payload["generator_sha"] = "0" * 40
+            payload["generator_source_tree"] = "changed-source"
             path.write_text(json.dumps(payload))
     with pytest.raises(SystemExit) as caught:
         cli._run_score_test(args)
@@ -216,7 +217,9 @@ def test_durable_failures(harness, monkeypatch, fault):
     with pytest.raises((SystemExit, RuntimeError, OSError)) as caught:
         cli._run_score_test(args)
     if isinstance(caught.value, SystemExit):
-        assert caught.value.code == (7 if fault == "exit" else 2)
+        assert caught.value.code == (
+            1 if fault in ("exception", "exit", "report") else 2
+        )
     result = entry()
     assert result["status"] == (
         "ERROR" if fault in ("exception", "exit", "report") else "FAIL"
@@ -246,7 +249,7 @@ def test_failure_before_numbers_does_not_invent_them(harness, monkeypatch):
     monkeypatch.setattr(grid, "score_with_frozen_cuts", stop)
     with pytest.raises(SystemExit) as caught:
         cli._run_score_test(args)
-    assert caught.value.code == 9
+    assert caught.value.code == 1
     assert all(
         rows == [{"day": day, "result": None} for day in (3.0, 5.0, 7.0)]
         for rows in entry()["numbers"].values()
@@ -308,7 +311,7 @@ def test_claim_failure_is_durable_and_records_provenance(harness, monkeypatch):
         raise OSError("synthetic claim failure")
 
     monkeypatch.setattr(cli, "_claim_score_once_marker", fail_claim)
-    with pytest.raises(OSError, match="claim failure"):
+    with pytest.raises(SystemExit, match="1"):
         cli._run_score_test(args)
     result = entry()
     assert result["status"] == "ERROR" and result["consumed"]
@@ -336,7 +339,7 @@ def test_stdout_failure_keeps_numbers_and_marks_fail(harness, monkeypatch):
         raise BrokenPipeError("synthetic closed stdout")
 
     monkeypatch.setattr(cli, "print", broken_stdout, raising=False)
-    with pytest.raises(BrokenPipeError):
+    with pytest.raises(SystemExit, match="1"):
         cli._run_score_test(args)
     assert entry()["status"] == "ERROR" and entry()["consumed"]
     assert len(entry()["numbers"]) == 2
@@ -345,7 +348,13 @@ def test_stdout_failure_keeps_numbers_and_marks_fail(harness, monkeypatch):
 
 @pytest.mark.parametrize("after_return", [False, True])
 @pytest.mark.parametrize(
-    "exception", [RuntimeError("synthetic evaluator error"), SystemExit(7)]
+    "exception",
+    [
+        RuntimeError("synthetic evaluator error"),
+        SystemExit(7),
+        SystemExit(0),
+        KeyboardInterrupt(),
+    ],
 )
 def test_evaluator_error_nulls_and_rescore(
     harness, monkeypatch, after_return, exception
@@ -362,20 +371,22 @@ def test_evaluator_error_nulls_and_rescore(
         return rows
 
     monkeypatch.setattr(grid, "score_with_frozen_cuts", forced)
-    with pytest.raises(type(exception)) as caught:
+    with pytest.raises(SystemExit) as caught:
         cli._run_score_test(args)
-    assert caught.value is exception
+    assert caught.value.code == 1
+    assert caught.value.__cause__ is exception
     result = entry()
     assert result["status"] == "ERROR" and result["consumed"] is True
-    assert result["exception"] == {
-        "type": type(exception).__name__,
-        "message": str(exception),
-    }
+    assert result["exception"]["type"] == type(exception).__name__
+    assert result["exception"]["message"] == str(exception)
+    assert type(exception).__name__ in result["exception"]["traceback"]
     for population in (sample.LIKE_KIND, sample.REALISTIC):
         if population in returned:
             assert json.dumps(
                 result["numbers"][population], sort_keys=True
-            ) == json.dumps(returned[population], sort_keys=True)
+            ) == json.dumps(
+                cli._score_json_values(returned[population]), sort_keys=True
+            )
             assert result["numbers"][population][0]["n_caught_not_judgeable"] == 0
         else:
             assert result["numbers"][population] == [
@@ -397,3 +408,106 @@ def test_evaluator_error_nulls_and_rescore(
     )
     assert len(history) == 2
     assert json.dumps(history[0], sort_keys=True) == json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("fault", ["missing", "stale", "version", "dust"])
+def test_preflight_all_caches_before_any_loader(harness, monkeypatch, index, fault):
+    args, folders, _ = harness
+    folder = folders[index]
+    receipt = folder / "score_provenance.json"
+    if fault == "missing":
+        receipt.unlink()
+    elif fault == "stale":
+        receipt.write_text("{}")
+    else:
+        path = folder / "manifest.json"
+        manifest = json.loads(path.read_text())
+        manifest["cache_version" if fault == "version" else "dust_mode"] = "invalid"
+        path.write_text(json.dumps(manifest))
+        receipt.write_text(
+            json.dumps(cli._score_receipt(folder, cli._score_map_provenance()))
+        )
+
+    def forbidden(*a, **k):
+        pytest.fail("Table loader/evaluator reached before all provenance passed")
+
+    monkeypatch.setattr(sample, "_read_cache", forbidden)
+    monkeypatch.setattr(grid, "score_with_frozen_cuts", forbidden)
+    monkeypatch.setattr(grid, "score_exact_copies", forbidden)
+    with pytest.raises(SystemExit, match="1"):
+        cli._run_score_test(args)
+    assert not cli.test_set_scored_path().exists()
+
+
+def test_receipt_same_source_different_head_and_changed_source(harness, monkeypatch):
+    _, folders, _ = harness
+    receipt_path = folders[0] / "score_provenance.json"
+    saved = receipt_path.read_bytes()
+    old_sha = json.loads(saved)["generator_sha"]
+    monkeypatch.setattr(cli, "_score_generator_sha", lambda: "b" * 40)
+    assert cli._verify_score_receipt(folders[0])["generator_sha"] == old_sha
+    assert receipt_path.read_bytes() == saved
+    monkeypatch.setattr(
+        cli, "_score_source_tree", lambda sha: "old" if sha == old_sha else "new"
+    )
+    with pytest.raises(SystemExit, match="1"):
+        cli._verify_score_receipt(folders[0])
+    assert receipt_path.read_bytes() == saved
+
+
+def test_strict_json_recursive_outcome(harness, monkeypatch):
+    args, _, _ = harness
+    monkeypatch.setattr(
+        grid,
+        "score_with_frozen_cuts",
+        lambda *a, **k: [
+            {
+                "day": day,
+                "n_caught_not_judgeable": 0,
+                "undefined": float("nan"),
+                "nested": [float("inf"), {"negative": float("-inf"), "zero": 0.0}],
+            }
+            for day in (3.0, 5.0, 7.0)
+        ],
+    )
+    monkeypatch.setattr(grid, "format_test_score", lambda *a, **k: "synthetic")
+    monkeypatch.setattr(
+        grid,
+        "score_exact_copies",
+        lambda *a, **k: {
+            "official": {"blocker": False, "status": "pass"},
+            "undefined": [float("nan"), float("inf")],
+            "zero": 0,
+        },
+    )
+    cli._run_score_test(args)
+
+    def invalid(token):
+        raise AssertionError(f"Non-JSON token: {token}")
+
+    payload = json.loads(cli.test_set_scored_path().read_text(), parse_constant=invalid)
+    result = next(iter(payload["sets"].values()))[-1]
+    row = result["numbers"][sample.LIKE_KIND][0]
+    assert row["undefined"] is None
+    assert row["nested"] == [None, {"negative": None, "zero": 0.0}]
+    assert row["n_caught_not_judgeable"] == 0
+    assert result["sanity"]["undefined"] == [None, None]
+    assert result["sanity"]["zero"] == 0
+
+
+@pytest.mark.parametrize("returncode,stdout", [(0, "c" * 40), (1, ""), (0, "bad")])
+def test_source_tree_git_metadata(monkeypatch, returncode, stdout):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=returncode, stdout=stdout)
+
+    monkeypatch.setattr("subprocess.run", run)
+    if returncode or len(stdout) != 40:
+        with pytest.raises(ValueError):
+            cli._score_source_tree("a" * 40)
+    else:
+        assert cli._score_source_tree("a" * 40) == stdout
+    assert calls == [["git", "rev-parse", "a" * 40 + ":src/kilonova_hunter"]]
