@@ -618,6 +618,7 @@ def _run_score_test(args) -> None:
         by_population = {}
         sanity = None
         failure = None
+        scientific_exit = None
         try:
             _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
             for population, manifest, events, curves in loaded_sets:
@@ -673,7 +674,8 @@ def _run_score_test(args) -> None:
             _complete_pending_score(identity, destination)
             print(text)
             if failure:
-                raise SystemExit(2)
+                scientific_exit = SystemExit(2)
+                raise scientific_exit
             _record_score_outcome(
                 identity,
                 by_population,
@@ -691,8 +693,9 @@ def _run_score_test(args) -> None:
                 sanity,
                 receipts,
                 copies_receipt,
-                status="FAIL",
-                reason=f"{failure}; {reason}" if failure else reason,
+                status="FAIL" if error is scientific_exit else "ERROR",
+                reason=failure if error is scientific_exit else reason,
+                error=None if error is scientific_exit else error,
             )
             raise
     finally:
@@ -831,19 +834,31 @@ def _record_score_outcome(
     *,
     status,
     reason,
+    error=None,
 ) -> None:
-    """Update only this run's last entry; pending/FAIL entries remain consumed."""
+    """Persist returned results; pending, FAIL and ERROR attempts stay consumed."""
     payload = _ledger_payload()
     entry = payload["sets"][identity][-1]
     entry.update(
         {
             "status": status,
             "consumed": True,
-            "numbers": numbers,
+            "numbers": {
+                population: numbers.get(
+                    population,
+                    [{"day": day, "result": None} for day in (3.0, 5.0, 7.0)],
+                )
+                for population in receipts
+            },
+            "exception": (
+                {"type": type(error).__name__, "message": str(error)}
+                if error is not None
+                else None
+            ),
             "sanity": sanity,
             "fail_reason": reason,
             "not_computed": {
-                name: "not computed before termination"
+                name: "not returned; internal progress unavailable"
                 for name in ("2017-like", "realistic", "sanity")
                 if (sanity is None if name == "sanity" else name not in numbers)
             },
@@ -1248,10 +1263,16 @@ def _write_pending_score(
         entry.update(
             {
                 "consumed": True,
-                "numbers": {},
+                "numbers": {
+                    population: [
+                        {"day": day, "result": None} for day in (3.0, 5.0, 7.0)
+                    ]
+                    for population in receipts
+                },
+                "exception": None,
                 "sanity": None,
                 "not_computed": {
-                    name: "not computed before termination"
+                    name: "not returned; internal progress unavailable"
                     for name in (*receipts, "sanity")
                 },
                 "fail_reason": "scoring not yet complete",

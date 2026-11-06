@@ -218,7 +218,10 @@ def test_durable_failures(harness, monkeypatch, fault):
     if isinstance(caught.value, SystemExit):
         assert caught.value.code == (7 if fault == "exit" else 2)
     result = entry()
-    assert result["status"] == "FAIL" and result["consumed"] is True
+    assert result["status"] == (
+        "ERROR" if fault in ("exception", "exit", "report") else "FAIL"
+    )
+    assert result["consumed"] is True
     assert result["numbers"][sample.LIKE_KIND]
     assert result["fail_reason"]
     if fault in ("exception", "exit"):
@@ -244,9 +247,12 @@ def test_failure_before_numbers_does_not_invent_them(harness, monkeypatch):
     with pytest.raises(SystemExit) as caught:
         cli._run_score_test(args)
     assert caught.value.code == 9
-    assert entry()["numbers"] == {}
+    assert all(
+        rows == [{"day": day, "result": None} for day in (3.0, 5.0, 7.0)]
+        for rows in entry()["numbers"].values()
+    )
     assert len(entry()["not_computed"]) == 3
-    assert entry()["status"] == "FAIL"
+    assert entry()["status"] == "ERROR"
 
 
 def test_rebuild_routes_to_frozen_generators_without_reuse(harness, monkeypatch):
@@ -305,8 +311,10 @@ def test_claim_failure_is_durable_and_records_provenance(harness, monkeypatch):
     with pytest.raises(OSError, match="claim failure"):
         cli._run_score_test(args)
     result = entry()
-    assert result["status"] == "FAIL" and result["consumed"]
-    assert result["numbers"] == {}
+    assert result["status"] == "ERROR" and result["consumed"]
+    assert all(
+        row["result"] is None for rows in result["numbers"].values() for row in rows
+    )
     assert len(result["not_computed"]) == 3
     assert result["provenance"][sample.LIKE_KIND]["generator_sha"]
     assert "claim failure" in result["fail_reason"]
@@ -330,6 +338,62 @@ def test_stdout_failure_keeps_numbers_and_marks_fail(harness, monkeypatch):
     monkeypatch.setattr(cli, "print", broken_stdout, raising=False)
     with pytest.raises(BrokenPipeError):
         cli._run_score_test(args)
-    assert entry()["status"] == "FAIL" and entry()["consumed"]
+    assert entry()["status"] == "ERROR" and entry()["consumed"]
     assert len(entry()["numbers"]) == 2
     assert "closed stdout" in entry()["fail_reason"]
+
+
+@pytest.mark.parametrize("after_return", [False, True])
+@pytest.mark.parametrize(
+    "exception", [RuntimeError("synthetic evaluator error"), SystemExit(7)]
+)
+def test_evaluator_error_nulls_and_rescore(
+    harness, monkeypatch, after_return, exception
+):
+    args, _, _ = harness
+    original = grid.score_with_frozen_cuts
+    returned = {}
+
+    def forced(*a, **kw):
+        if not after_return or kw["population"] == sample.REALISTIC:
+            raise exception
+        rows = original(*a, **kw)
+        returned[kw["population"]] = rows
+        return rows
+
+    monkeypatch.setattr(grid, "score_with_frozen_cuts", forced)
+    with pytest.raises(type(exception)) as caught:
+        cli._run_score_test(args)
+    assert caught.value is exception
+    result = entry()
+    assert result["status"] == "ERROR" and result["consumed"] is True
+    assert result["exception"] == {
+        "type": type(exception).__name__,
+        "message": str(exception),
+    }
+    for population in (sample.LIKE_KIND, sample.REALISTIC):
+        if population in returned:
+            assert json.dumps(
+                result["numbers"][population], sort_keys=True
+            ) == json.dumps(returned[population], sort_keys=True)
+            assert result["numbers"][population][0]["n_caught_not_judgeable"] == 0
+        else:
+            assert result["numbers"][population] == [
+                {"day": day, "result": None} for day in (3.0, 5.0, 7.0)
+            ]
+    assert result["sanity"] is None
+    saved = cli.test_set_scored_path().read_bytes()
+    with pytest.raises(SystemExit, match="1"):
+        cli._run_score_test(args)
+    assert cli.test_set_scored_path().read_bytes() == saved
+    monkeypatch.setattr(grid, "score_with_frozen_cuts", original)
+    args.rescore_decision = "SYNTHETIC-approved-error-retry"
+    cli._run_score_test(args)
+    assert entry()["status"] == "complete"
+    with pytest.raises(SystemExit, match="1"):
+        cli._run_score_test(args)
+    history = next(
+        iter(json.loads(cli.test_set_scored_path().read_text())["sets"].values())
+    )
+    assert len(history) == 2
+    assert json.dumps(history[0], sort_keys=True) == json.dumps(result, sort_keys=True)
