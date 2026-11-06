@@ -137,6 +137,49 @@ class ColorRise:
     weighting_note: str = ""
 
 
+def latest_same_night_color(
+    light_curve: pd.DataFrame, *, day: float = float("inf")
+) -> ColorMeasurement:
+    """Latest pair, ordered by (later time, g time, r time), as in option checks.
+
+    Decision: option (ii), Sage Nov 4 2026; reverses 12(3).
+    Explicit night labels support ZTF; otherwise attrs supply the Rubin merger MJD.
+    Without absolute metadata, time zero is treated as MJD zero (toy curves).
+    Reddening keeps its existing independent interpolated color samples.
+    """
+    from kilonova_hunter.judge import signal_to_noise
+
+    _require_light_curve(light_curve)
+    points = light_curve.loc[light_curve.time_days <= day].copy()
+    if "magnitude_error" in points:
+        points = points.loc[
+            signal_to_noise(points.magnitude_error.to_numpy()) + 1e-9 >= 5
+        ]
+    points = points.dropna(subset=["time_days", "magnitude"])
+    if "night" not in points:
+        points["night"] = np.floor(
+            float(light_curve.attrs.get("merger_mjd", 0.0)) + points.time_days - 0.5
+        )
+    pairs = []
+    for g in points.loc[points["filter"] == "g"].itertuples():
+        for r in points.loc[points["filter"] == "r"].itertuples():
+            if g.night == r.night:
+                pairs.append(
+                    (
+                        max(g.time_days, r.time_days),
+                        g.time_days,
+                        r.time_days,
+                        g.magnitude - r.magnitude,
+                    )
+                )
+    if not pairs:
+        return ColorMeasurement(
+            None, day, "Not enough data: no same-night g+r detection pair."
+        )
+    when, _, _, value = max(pairs)
+    return ColorMeasurement(float(value), float(when), "Latest same-night g+r pair.")
+
+
 def fade_rates(
     light_curve: pd.DataFrame,
     thresholds: Thresholds | None = None,
