@@ -15,6 +15,14 @@ def isolated_runtime_artifacts(tmp_path, monkeypatch):
     import json
     import socket
 
+    # Reuse the committed sncosmo mirror before its first bandpass lookup.
+    # Setting this only in the MOSFiT test is too late: DataMirror caches its
+    # first root directory. No network exception is needed for real models.
+    monkeypatch.setenv(
+        "SNCOSMO_DATA_DIR",
+        str(Path(__file__).resolve().parents[1] / "checks/mosfit/sncosmo_bandpasses"),
+    )
+
     from kilonova_hunter import alerts, cli
 
     monkeypatch.setattr(cli, "test_set_scored_path", lambda: tmp_path / "ledger.json")
