@@ -519,6 +519,14 @@ def _run_score_test(args) -> None:
         print("Rebuilt cache with integrity receipts; no scoring or consumption.")
         return
     expected_map = dust_map_label()
+    # Preflight ALL populations and sanity before decoding any held tables.
+    folders = {
+        population: cache / population / "test" for population in (LIKE_KIND, REALISTIC)
+    }
+    folders["sanity"] = cache / "at2017gfo-exact" / "copies"
+    preflight = {}
+    for population, folder in folders.items():
+        preflight[population] = _preflight_score_cache(folder, expected_map)
     loaded_sets = []
     loaded_hashes = {}
     for population in (LIKE_KIND, REALISTIC):
@@ -543,10 +551,7 @@ def _run_score_test(args) -> None:
                 "Simulate it before scoring. This command does not simulate."
             )
         try:
-            loaded_hashes[population] = {
-                path.name: _score_file_hash(path)
-                for path in (manifest_path, events_path, curves_path)
-            }
+            loaded_hashes[population] = preflight[population]["test_set_hashes"]
             loaded = _read_cache(folder)
         except ValueError as error:
             _fail(f"{error} Nothing was written.")
@@ -575,8 +580,8 @@ def _run_score_test(args) -> None:
     # hash differs, for example a larger sample_size on the same seed.
     # A pending ledger entry counts as scored: the set is consumed by a
     # crash, and another score needs --rescore-decision.
-    # This runs before the cache-version check so a rescore is the
-    # Rescore refusal, not a provenance mismatch.
+    # Provenance preflight precedes loading; overlap is checked under
+    # the lock before any pending consumption or numerical scoring.
     identity = test_set_sha256(loaded_sets)
     # Take the lock before any ledger or score file is written. A lock
     # that is already there is left in place. The run that creates it
@@ -605,6 +610,8 @@ def _run_score_test(args) -> None:
             if receipt.get("test_set_hashes") != loaded_hashes[population]:
                 _fail("Cache changed while loading; nothing was consumed.")
         copies_receipt, copies_loaded = _verified_score_copies(cache)
+        if copies_receipt != preflight["sanity"]:
+            _fail("Sanity cache changed while loading; nothing was consumed.")
         _write_pending_score(
             identity,
             combo,
@@ -697,9 +704,30 @@ def _run_score_test(args) -> None:
                 reason=failure if error is scientific_exit else reason,
                 error=None if error is scientific_exit else error,
             )
-            raise
+            if error is scientific_exit:
+                raise
+            raise SystemExit(1) from error
     finally:
         _release_score_lock(lock)
+
+
+def _preflight_score_cache(folder: Path, expected_map: str) -> dict:
+    """Metadata and raw hashes only: never decode events or light curves."""
+    import json
+
+    from kilonova_hunter.sample import cache_refusal_reason
+
+    receipt = _verify_score_receipt(folder)
+    try:
+        manifest = json.loads((folder / "manifest.json").read_text())
+    except (OSError, ValueError) as error:
+        _fail(f"Cache manifest refused for {folder}: {error}")
+    reason = cache_refusal_reason(manifest)
+    if reason is not None:
+        _fail(f"The {folder} cache is refused: {reason}")
+    if manifest.get("dust_mode") != "sfd" or manifest.get("dust_map") != expected_map:
+        _fail(f"The {folder} cache has no recorded SFD provenance.")
+    return receipt
 
 
 def _score_file_hash(path: Path) -> str:
@@ -750,12 +778,33 @@ def _score_generator_sha() -> str:
     return sha
 
 
+def _score_source_tree(sha: str) -> str:
+    """Hash the committed generator source, independent of non-source commits."""
+    import subprocess
+
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise ValueError("Invalid generator SHA")
+    result = subprocess.run(
+        ["git", "rev-parse", f"{sha}:src/kilonova_hunter"],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tree = result.stdout.strip()
+    if result.returncode or len(tree) != 40:
+        raise ValueError("Generator source tree unavailable")
+    return tree
+
+
 def _score_receipt(folder: Path, maps: dict) -> dict:
     from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
     from kilonova_hunter.sample import _cache_paths
 
+    sha = _score_generator_sha()
     return {
-        "generator_sha": _score_generator_sha(),
+        "generator_sha": sha,
+        "generator_source_tree": _score_source_tree(sha),
         "diffusion_fix": DIFFUSION_FIX_ID,
         "dust_mode": "sfd",
         **maps,
@@ -770,6 +819,10 @@ def _verify_score_receipt(folder: Path) -> dict:
     try:
         receipt = json.loads((folder / "score_provenance.json").read_text())
         expected = _score_receipt(folder, _score_map_provenance())
+        recorded_sha = receipt.get("generator_sha", "")
+        if _score_source_tree(recorded_sha) != expected["generator_source_tree"]:
+            raise ValueError("Generator source changed")
+        expected["generator_sha"] = recorded_sha
         if receipt != expected:
             raise ValueError("missing, stale or mismatched provenance fields/hashes")
     except (OSError, ValueError) as error:
@@ -837,6 +890,8 @@ def _record_score_outcome(
     error=None,
 ) -> None:
     """Persist returned results; pending, FAIL and ERROR attempts stay consumed."""
+    import traceback
+
     payload = _ledger_payload()
     entry = payload["sets"][identity][-1]
     entry.update(
@@ -851,7 +906,11 @@ def _record_score_outcome(
                 for population in receipts
             },
             "exception": (
-                {"type": type(error).__name__, "message": str(error)}
+                {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                    "traceback": "".join(traceback.format_exception(error)),
+                }
                 if error is not None
                 else None
             ),
@@ -1116,6 +1175,19 @@ def _ledger_hashes() -> set[str]:
     return set(payload.get("sets", {}))
 
 
+def _score_json_values(value):
+    """Undefined ledger values are null; measured zero remains zero."""
+    import math
+
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _score_json_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_score_json_values(item) for item in value]
+    return value
+
+
 def _write_ledger(path: Path, payload: dict) -> None:
     """Replace the ledger atomically. The temp file sits in the same directory."""
     import json
@@ -1123,7 +1195,10 @@ def _write_ledger(path: Path, payload: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(_score_json_values(payload), indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     os.replace(temporary, path)
 
 
