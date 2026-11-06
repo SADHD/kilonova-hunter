@@ -58,8 +58,8 @@ def test_reports_say_tns_is_not_yet_implemented(tmp_path) -> None:
     assert TNS_STATUS_LINE in score
     assert TNS_STATUS_LINE in report
     assert "Judgeable (a)" in summary
-    assert "Judgeable (b)" in summary
-    assert "It does not replace (a)." in summary
+    assert "Judgeable (b)" not in summary
+    assert "Decision 12(22)" in summary
     assert "Judgeable (a)" in score
     assert "Judgeable (a)" in report
     with pytest.raises(NotImplementedError):
@@ -258,11 +258,10 @@ def test_far_distance_bin_ends_at_300_and_includes_300() -> None:
     assert middle["n_total"] == 1
     assert far["n_total"] == 1
     assert far["n_judgeable"] == 1
-    assert far["n_judgeable_candidate"] == 0
 
 
-def test_grid_row_shows_both_judgeable_definitions() -> None:
-    """(a) stays the recall count. (b) is reported beside it and is not official."""
+def test_grid_row_shows_only_frozen_judgeable_definition() -> None:
+    """Only the frozen count is reported."""
     combo = {
         "redder_than_g_minus_r": 0.0,
         "min_g_minus_r_rise": 0.1,
@@ -271,7 +270,6 @@ def test_grid_row_shows_both_judgeable_definitions() -> None:
     }
     official = _one_prepared("official-only", 40.0)
     both = _one_prepared("both-definitions", 50.0)
-    both.judgeable_candidate = True
     row = score_prepared(
         [official, both],
         combo,
@@ -280,11 +278,10 @@ def test_grid_row_shows_both_judgeable_definitions() -> None:
         status="ready",
     )
     assert row["n_judgeable"] == 2
-    assert row["n_judgeable_candidate"] == 1
     text = _combo_sentence(row)
     assert "Judgeable (a, official): 2" in text
-    assert "not adopted" in text
-    assert "Judgeable (b, candidate, not adopted): 1" in text
+    assert "not adopted" not in text
+    assert "Judgeable (b, candidate" not in text
 
 
 def test_caught_but_not_judgeable_check_includes_day_7() -> None:
@@ -369,35 +366,16 @@ def test_judgeable_copy_records_a_skipped_reddening_rule() -> None:
     assert "window 2 days" in text
 
 
-def test_copy_sign_off_follows_the_official_verdict_unless_the_draw_stopped_on_b() -> (
-    None
-):
-    """(b) from a draw that stopped on (a) does not block the process exit."""
+def test_copy_sign_off_follows_the_official_verdict() -> None:
+    """The official verdict alone controls the process exit."""
     from kilonova_hunter.grid import copy_sign_off
 
-    untestable = {"status": "untestable", "blocker": True}
-    failed = {"status": "fail", "blocker": True}
-    passed = {"status": "pass", "blocker": False}
-    blocked, status = copy_sign_off(
-        {"official": untestable, "candidate": untestable, "stopping_definition": "a"}
-    )
-    assert blocked is True
-    assert status == "untestable"
-    blocked, status = copy_sign_off(
-        {"official": failed, "candidate": passed, "stopping_definition": "a"}
-    )
-    assert blocked is True
-    assert status == "fail"
-    blocked, status = copy_sign_off(
-        {"official": passed, "candidate": untestable, "stopping_definition": "a"}
-    )
-    assert blocked is False
-    assert status is None
-    blocked, status = copy_sign_off(
-        {"official": passed, "candidate": failed, "stopping_definition": "b"}
-    )
-    assert blocked is True
-    assert status == "fail"
+    for verdict, expected in (
+        ({"status": "untestable", "blocker": True}, (True, "untestable")),
+        ({"status": "fail", "blocker": True}, (True, "fail")),
+        ({"status": "pass", "blocker": False}, (False, None)),
+    ):
+        assert copy_sign_off({"official": verdict}) == expected
 
 
 def test_sanity_copy_verdict_is_pass_fail_or_untestable() -> None:
@@ -450,18 +428,12 @@ def test_zero_judgeable_copies_are_a_sign_off_blocker() -> None:
     assert result["n_judgeable"] == 0
     assert result["official"]["status"] == "untestable"
     assert result["blocker"] is True
-    assert result["candidate"]["status"] == "untestable"
-    assert result["blocker_candidate"] is True
     text = "\n".join(_copy_lines(result))
     assert "UNTESTABLE" in text
     assert "v1 not Done" in text
     assert "blocks sign-off" in text
-    assert "Indicative, not a 12(16) result." in text
+    assert "Indicative, not a 12(16) result." not in text
     assert "nan" not in text.lower()
-    stopped_on_b = dict(result)
-    stopped_on_b["stopping_definition"] = "b"
-    b_text = "\n".join(_copy_lines(stopped_on_b))
-    assert "Indicative, not a 12(16) result." not in b_text
 
 
 def test_exact_copies_are_left_out_of_the_recall_denominator() -> None:
@@ -584,7 +556,6 @@ def test_bluer_color_hook_recomputes_recall_and_is_not_the_grid() -> None:
             object_id="like-000",
             distance_mpc=40.0,
             judgeable=True,
-            judgeable_candidate=True,
             model_failed=False,
             fade_passed=True,
             color_value=0.45,
@@ -735,60 +706,6 @@ def test_exact_copy_loop_stops_at_the_4000_cap_untestable(
     assert manifest["n_judgeable_day3"] == 0
 
 
-def test_copy_loop_switch_covers_both_judgeable_definitions(
-    tmp_path, monkeypatch
-) -> None:
-    """(a) can stop while (b) is still untestable, and the cache keeps them apart."""
-    from kilonova_hunter import sample as sample_mod
-    from kilonova_hunter.sample import simulate_exact_copies
-    from kilonova_hunter.sky import DustSource
-
-    real_record = sample_mod._event_record
-
-    def official_only(event, *, error_reason, curve):
-        row = real_record(event, error_reason=error_reason, curve=curve)
-        row["judgeable_day3"] = 1
-        row["judgeable_candidate_day3"] = 0
-        return row
-
-    def fake_jobs(jobs, workers):
-        return [(job["event"].object_id, pd.DataFrame(), None) for job in jobs]
-
-    monkeypatch.setattr(sample_mod, "_event_record", official_only)
-    monkeypatch.setattr(sample_mod, "_run_jobs", fake_jobs)
-    monkeypatch.setattr(
-        sample_mod, "redshift_at_luminosity_distance", lambda _distance: 0.009
-    )
-    dust = DustSource(mode="dry-run", reason="test")
-    official = simulate_exact_copies(
-        dust=dust,
-        cache_dir=tmp_path / "a",
-        cap=30,
-        batch_size=5,
-        target_judgeable=5,
-        judgeable_definition="a",
-    )
-    assert official.n_simulated == 5
-    assert official.status == "ready"
-    candidate = simulate_exact_copies(
-        dust=dust,
-        cache_dir=tmp_path / "a",
-        cap=30,
-        batch_size=5,
-        target_judgeable=5,
-        judgeable_definition="b",
-    )
-    assert candidate.n_simulated == 30
-    assert candidate.status == "untestable"
-    with pytest.raises(ValueError, match="judgeable_definition"):
-        simulate_exact_copies(
-            dust=dust,
-            cache_dir=tmp_path / "c",
-            judgeable_definition="c",
-            count=1,
-        )
-
-
 def test_split_rng_seeds_are_derived_independently() -> None:
     """Each split's stream is keyed by its name, not by draw order.
 
@@ -816,8 +733,8 @@ def test_split_rng_seeds_are_derived_independently() -> None:
     )
 
 
-def test_color_sensitivity_scope_covers_both_definitions() -> None:
-    """Both sets, days 3/5/7, both shifts, and recall (a) and (b)."""
+def test_color_sensitivity_scope_covers_frozen_definition() -> None:
+    """Both sets, days 3/5/7, both shifts, and the frozen recall denominator."""
     from kilonova_hunter.grid import (
         COLOR_SENSITIVITY_DAYS,
         COLOR_SENSITIVITY_POPULATIONS,
@@ -831,7 +748,6 @@ def test_color_sensitivity_scope_covers_both_definitions() -> None:
         object_id="shift",
         distance_mpc=40.0,
         judgeable=True,
-        judgeable_candidate=False,
         model_failed=False,
         fade_passed=True,
         color_value=0.35,
@@ -855,10 +771,10 @@ def test_color_sensitivity_scope_covers_both_definitions() -> None:
                 needle = f"{population} day {day:g}, g-r bluer by +{shift:.1f} mag:"
                 assert needle in report
     bluer = "2017-like day 3, g-r bluer by +"
-    assert f"{bluer}0.4 mag: recall (a) 0.0%, recall (b) no recall." in report
-    assert f"{bluer}0.3 mag: recall (a) 100.0%, recall (b) no recall." in report
+    assert f"{bluer}0.4 mag: recall (a) 0.0%." in report
+    assert f"{bluer}0.3 mag: recall (a) 100.0%." in report
     assert "recall (a)" in report
-    assert "recall (b)" in report
+    assert "recall (b)" not in report
     assert REALISTIC_DAY7_LABEL in report
     assert report.count(REALISTIC_DAY7_LABEL) == 1
 

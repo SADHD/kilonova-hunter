@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from kilonova_hunter.judge import JUDGE_DAYS, is_candidate_judgeable, is_judgeable
+from kilonova_hunter.judge import JUDGE_DAYS, is_judgeable
 from kilonova_hunter.model_grid import (
     drop_after_two_component_cap,
     uses_two_component_model,
@@ -487,12 +487,6 @@ def _event_record(event, *, error_reason: str | None, curve: pd.DataFrame) -> di
             False if failed else is_judgeable(curve, day, merger_mjd=event.merger_mjd)
         )
         row[f"judgeable_day{int(day)}"] = int(flag)
-        candidate = (
-            False
-            if failed
-            else is_candidate_judgeable(curve, day, merger_mjd=event.merger_mjd)
-        )
-        row[f"judgeable_candidate_day{int(day)}"] = int(candidate)
     return row
 
 
@@ -821,24 +815,15 @@ def simulate_population(
 
 
 def _judgeable_stop_column(definition: str) -> str:
-    """Which day-3 flag stops the exact-copy loop.
-
-    ``a`` is the official ``is_judgeable`` rule. ``b`` is the candidate
-    rule. The choice is part of the cache identity, so a cache built
-    for one definition is not reused for the other.
-    """
-    if definition == "a":
-        return "judgeable_day3"
-    if definition == "b":
-        return "judgeable_candidate_day3"
-    raise ValueError(
-        "judgeable_definition must be 'a' (official) or 'b' (candidate), "
-        f"got {definition!r}."
-    )
+    """Only the frozen, filter-independent definition is supported."""
+    if definition != "a":
+        raise ValueError("judgeable_definition must be 'a'.")
+    return "judgeable_day3"
 
 
 def simulate_exact_copies(
     *,
+    seed: int = EXACT_SEED,
     survey: SurveySettings | None = None,
     dust: DustSource | None = None,
     cache_dir: Path | str = Path("data") / "recall" / "cache",
@@ -851,29 +836,27 @@ def simulate_exact_copies(
 ) -> SampleResult:
     """Simulate exact AT2017gfo copies. They are not a recall set.
 
-    The default follows Decision Log 12(16), which is proposed and
-    not yet adopted. Batches are drawn at 40 Mpc, with random
-    cadence dates and random positions, until at least
-    ``target_judgeable`` copies are judgeable at day 3, or ``cap``
-    copies have been drawn. ``judgeable_definition`` ``a`` uses the
-    official rule. ``b`` uses the candidate rule. Hitting the cap with
-    fewer than the target leaves the status ``untestable``. Pass
-    ``count`` to draw a fixed number instead. That fixed draw is for
-    tests. The report uses the default, definition (a), cap 4000.
+    Decision 12(16), adopted Nov 4: draw random cadence dates
+    and positions at 40 Mpc until 50 are judgeable at day 3, cap 4000.
+    Definition (a) is the only supported rule. A fixed ``count`` is for tests.
     """
     stop_column = _judgeable_stop_column(judgeable_definition)
     sky = survey if survey is not None else evaluation_survey()
     dust_source = dust if dust is not None else open_dust_source()
     folder = Path(cache_dir) / EXACT_KIND / "copies"
     loaded = _read_cache(folder)
-    if loaded is not None and _exact_cache_matches(
-        loaded[0],
-        dust=dust_source,
-        survey=sky,
-        count=count,
-        target_judgeable=target_judgeable,
-        cap=cap,
-        judgeable_definition=judgeable_definition,
+    if (
+        loaded is not None
+        and loaded[0].get("seed") == seed
+        and _exact_cache_matches(
+            loaded[0],
+            dust=dust_source,
+            survey=sky,
+            count=count,
+            target_judgeable=target_judgeable,
+            cap=cap,
+            judgeable_definition=judgeable_definition,
+        )
     ):
         manifest, events, curves = loaded
         return _result_from_frames(
@@ -897,6 +880,7 @@ def simulate_exact_copies(
         this_batch = min(this_batch, goal - drawn)
         events_list, seeds = draw_exact_copies(
             dust_source,
+            seed=seed,
             count=this_batch,
             start_index=drawn,
             batch_index=batch_index,
@@ -937,7 +921,7 @@ def simulate_exact_copies(
         "survey": _survey_dict(sky),
         "n_simulated": len(events),
         "n_judgeable_day3": n_judge,
-        "seed": EXACT_SEED,
+        "seed": seed,
         "target_judgeable": None if count is not None else target_judgeable,
         "cap": None if count is not None else cap,
         "fixed_count": count,

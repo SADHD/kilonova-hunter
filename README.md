@@ -345,3 +345,17 @@ change has one. Downloaded data and generated plots stay out of git;
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+### Decision 12(22): bundled v1 revision (Nov 4, 2026)
+
+The color rule uses the latest same-night g+r detection pair available by
+judgment day D, with S/N at least 5 in each band. Pair ordering is the later
+exposure time, then g time, then r time (and color to break exact duplicates).
+Rubin fakes use floor(MJD − 0.5); ZTF uses its frozen Palomar-noon convention.
+Reddening retains its separate interpolated color samples. This implements
+option (ii) and reverses Decision 12(3). Judgeability stays
+at the frozen filter-independent section 1 definition.
+
+The rejected candidate fade measurement has been removed. The current fade
+fit includes the brightest observed point and keeps the 0.3 mag/day threshold.
+An unmeasurable fade fails the rule. Test scoring remains held.

@@ -1646,7 +1646,7 @@ def test_grid_exits_2_when_a_non_chosen_cell_breaks_rule_5(
         rises=rises,
     )
 
-    def fake_prepare(events, curves, day, settings=None):
+    def fake_prepare(events, curves, day, settings=None, **kwargs):
         return [fake]
 
     def fake_population(population, split, **kwargs):
@@ -1671,7 +1671,6 @@ def test_grid_exits_2_when_a_non_chosen_cell_breaks_rule_5(
         return {
             "n_copies": 50,
             "n_judgeable": 50,
-            "n_judgeable_candidate": 50,
             "n_caught_judgeable": 50,
             "n_caught_candidate": 50,
             "blocker": False,
@@ -2093,7 +2092,7 @@ def test_tuning_only_writes_no_test_split_and_leaves_the_ledger(
     assert "2017-like day 5, g-r bluer by +0.4 mag:" in summary
     assert "realistic day 7, g-r bluer by +0.3 mag:" in summary
     assert "recall (a)" in summary
-    assert "recall (b)" in summary
+    assert "recall (b)" not in summary
     assert _sha256(scored_test_set_ledger) == before_fixture
     assert _sha256(repo_ledger) == before_repo
     assert not claims.exists()

@@ -5,7 +5,6 @@ import pandas as pd
 from kilonova_hunter.judge import (
     MIN_SIGNAL_TO_NOISE,
     SNR_PER_INVERSE_ERROR,
-    is_candidate_judgeable,
     is_judgeable,
     rubin_night,
 )
@@ -110,31 +109,3 @@ def test_rubin_night_changes_at_noon_utc() -> None:
     assert int(rubin_night(60000.5)) == 60000
     assert int(rubin_night(60000.5 - 1e-6)) == 59999
     assert int(rubin_night(60000.0)) == 59999
-
-
-def test_candidate_judgeable_needs_a_color_one_day_after_the_r_peak() -> None:
-    """(b) is stricter than (a), and (a) itself does not change.
-
-    Both curves are officially judgeable. Only the one with g and r at
-    the r peak plus 1 day, inside the 1.0-day gap, counts under (b).
-    """
-    loud = _error_for_snr(10.0)
-    official_only = _curve(
-        [
-            (0.2, "g", loud),
-            (0.2, "r", loud),
-            (1.7, "g", loud),
-        ]
-    )
-    with_color = _curve(
-        [
-            (0.2, "g", loud),
-            (0.2, "r", loud),
-            (1.2, "g", loud),
-            (1.2, "r", loud),
-        ]
-    )
-    assert is_judgeable(official_only, 3.0, merger_mjd=60000.0) is True
-    assert is_candidate_judgeable(official_only, 3.0, merger_mjd=60000.0) is False
-    assert is_judgeable(with_color, 3.0, merger_mjd=60000.0) is True
-    assert is_candidate_judgeable(with_color, 3.0, merger_mjd=60000.0) is True
