@@ -196,6 +196,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     recall.add_argument(
+        "--rebuild-score-cache",
+        action="store_true",
+        help=(
+            "With --score-test, rebuild using the frozen generators into a new "
+            "--cache directory, write integrity receipts, and stop WITHOUT scoring."
+        ),
+    )
+    recall.add_argument(
         "--cuts",
         type=Path,
         default=None,
@@ -458,7 +466,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
 
 
 def _run_score_test(args) -> None:
-    """Score the cached test split once. Refuses to simulate or to retune.
+    """Score an attested cache once, or rebuild separately without scoring.
 
     The command stops unless the cuts file is frozen and the cache
     manifest names the SFD dust map. A pending ledger entry counts as
@@ -506,8 +514,21 @@ def _run_score_test(args) -> None:
     except (TypeError, ValueError):
         _fail("Each cut in the cuts file must be a finite number. Nothing was written.")
     cache = Path(args.cache)
+    if getattr(args, "rebuild_score_cache", False):
+        _rebuild_score_cache(cache)
+        print("Rebuilt cache with integrity receipts; no scoring or consumption.")
+        return
     expected_map = dust_map_label()
+    # Preflight ALL populations and sanity before decoding any held tables.
+    folders = {
+        population: cache / population / "test" for population in (LIKE_KIND, REALISTIC)
+    }
+    folders["sanity"] = cache / "at2017gfo-exact" / "copies"
+    preflight = {}
+    for population, folder in folders.items():
+        preflight[population] = _preflight_score_cache(folder, expected_map)
     loaded_sets = []
+    loaded_hashes = {}
     for population in (LIKE_KIND, REALISTIC):
         folder = cache / population / "test"
         manifest_path, events_path, curves_path = _cache_paths(folder)
@@ -530,6 +551,7 @@ def _run_score_test(args) -> None:
                 "Simulate it before scoring. This command does not simulate."
             )
         try:
+            loaded_hashes[population] = preflight[population]["test_set_hashes"]
             loaded = _read_cache(folder)
         except ValueError as error:
             _fail(f"{error} Nothing was written.")
@@ -558,8 +580,8 @@ def _run_score_test(args) -> None:
     # hash differs, for example a larger sample_size on the same seed.
     # A pending ledger entry counts as scored: the set is consumed by a
     # crash, and another score needs --rescore-decision.
-    # This runs before the cache-version check so a rescore is the
-    # Sage-via-PM refusal, not a provenance mismatch.
+    # Provenance preflight precedes loading; overlap is checked under
+    # the lock before any pending consumption or numerical scoring.
     identity = test_set_sha256(loaded_sets)
     # Take the lock before any ledger or score file is written. A lock
     # that is already there is left in place. The run that creates it
@@ -580,6 +602,16 @@ def _run_score_test(args) -> None:
                     f"dust_map is {manifest.get('dust_map')!r}. "
                     f"It has to be {expected_map!r}."
                 )
+        receipts = {
+            population: _verify_score_receipt(cache / population / "test")
+            for population, *_ in loaded_sets
+        }
+        for population, receipt in receipts.items():
+            if receipt.get("test_set_hashes") != loaded_hashes[population]:
+                _fail("Cache changed while loading; nothing was consumed.")
+        copies_receipt, copies_loaded = _verified_score_copies(cache)
+        if copies_receipt != preflight["sanity"]:
+            _fail("Sanity cache changed while loading; nothing was consumed.")
         _write_pending_score(
             identity,
             combo,
@@ -587,28 +619,314 @@ def _run_score_test(args) -> None:
             git_sha=_git_sha(),
             scored_at=_scored_at(),
             decision_id=decision_id,
+            receipts=receipts,
+            copies_receipt=copies_receipt,
         )
-        _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
         by_population = {}
-        for population, manifest, events, curves in loaded_sets:
-            by_population[population] = score_with_frozen_cuts(
-                events,
-                curves,
-                combo,
-                population=population,
-                status=str(manifest.get("status", "ready")),
+        sanity = None
+        failure = None
+        scientific_exit = None
+        try:
+            _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
+            for population, manifest, events, curves in loaded_sets:
+                by_population[population] = score_with_frozen_cuts(
+                    events,
+                    curves,
+                    combo,
+                    population=population,
+                    status=str(manifest.get("status", "ready")),
+                )
+                _record_score_outcome(
+                    identity,
+                    by_population,
+                    sanity,
+                    receipts,
+                    copies_receipt,
+                    status="pending",
+                    reason="remaining computations not complete",
+                )
+            from kilonova_hunter.grid import (
+                caught_not_judgeable_blocks,
+                copy_sign_off,
+                score_exact_copies,
             )
-        text = format_test_score(
-            by_population,
-            dry_run=False,
-            provisional=bool(cuts.get("provisional", False)),
-        )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text + "\n", encoding="utf-8")
-        _complete_pending_score(identity, destination)
+
+            sanity = score_exact_copies(copies_loaded[1], copies_loaded[2], combo)
+            reasons = []
+            if any(
+                caught_not_judgeable_blocks(rows) for rows in by_population.values()
+            ):
+                reasons.append("rule 5: caught-but-not-judgeable is nonzero")
+            blocked, copy_status = copy_sign_off(sanity)
+            if blocked:
+                reasons.append(f"sanity {copy_status}")
+            # Persist numbers before formatting or writing the report can fail.
+            failure = "; ".join(reasons) or None
+            _record_score_outcome(
+                identity,
+                by_population,
+                sanity,
+                receipts,
+                copies_receipt,
+                status="FAIL" if failure else "pending",
+                reason=failure,
+            )
+            text = format_test_score(
+                by_population,
+                dry_run=False,
+                provisional=bool(cuts.get("provisional", False)),
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text + "\n", encoding="utf-8")
+            _complete_pending_score(identity, destination)
+            print(text)
+            if failure:
+                scientific_exit = SystemExit(2)
+                raise scientific_exit
+            _record_score_outcome(
+                identity,
+                by_population,
+                sanity,
+                receipts,
+                copies_receipt,
+                status="complete",
+                reason=None,
+            )
+        except BaseException as error:
+            reason = f"{type(error).__name__}: {error}"
+            _record_score_outcome(
+                identity,
+                by_population,
+                sanity,
+                receipts,
+                copies_receipt,
+                status="FAIL" if error is scientific_exit else "ERROR",
+                reason=failure if error is scientific_exit else reason,
+                error=None if error is scientific_exit else error,
+            )
+            if error is scientific_exit:
+                raise
+            raise SystemExit(1) from error
     finally:
         _release_score_lock(lock)
-    print(text)
+
+
+def _preflight_score_cache(folder: Path, expected_map: str) -> dict:
+    """Metadata and raw hashes only: never decode events or light curves."""
+    import json
+
+    from kilonova_hunter.sample import cache_refusal_reason
+
+    receipt = _verify_score_receipt(folder)
+    try:
+        manifest = json.loads((folder / "manifest.json").read_text())
+    except (OSError, ValueError) as error:
+        _fail(f"Cache manifest refused for {folder}: {error}")
+    reason = cache_refusal_reason(manifest)
+    if reason is not None:
+        _fail(f"The {folder} cache is refused: {reason}")
+    if manifest.get("dust_mode") != "sfd" or manifest.get("dust_map") != expected_map:
+        _fail(f"The {folder} cache has no recorded SFD provenance.")
+    return receipt
+
+
+def _score_file_hash(path: Path) -> str:
+    import hashlib
+
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _verified_score_copies(cache: Path):
+    from kilonova_hunter.sample import _read_cache
+
+    folder = cache / "at2017gfo-exact" / "copies"
+    receipt = _verify_score_receipt(folder)
+    loaded = _read_cache(folder)
+    if loaded is None:
+        _fail("No attested sanity copies; nothing was consumed.")
+    if receipt != _verify_score_receipt(folder):
+        _fail("Sanity cache changed while loading; nothing was consumed.")
+    return receipt, loaded
+
+
+def _score_map_provenance() -> dict:
+    from kilonova_hunter.sky import sfd_directory
+
+    folder = sfd_directory().resolve(strict=True)
+    hashes = {
+        name: _score_file_hash(folder / name)
+        for name in ("SFD_dust_4096_ngp.fits", "SFD_dust_4096_sgp.fits")
+    }
+    return {"dust_map_path": str(folder), "dust_map_hashes": hashes}
+
+
+def _score_generator_sha() -> str:
+    """A commit id only attests the generator when its source is unchanged."""
+    import subprocess
+
+    sha = _git_sha()
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise ValueError("No generator SHA available")
+    result = subprocess.run(
+        ["git", "diff", "--quiet", sha, "--", "src/kilonova_hunter"],
+        cwd=_repo_root(),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError("Generator source differs from its recorded commit")
+    return sha
+
+
+def _score_source_tree(sha: str) -> str:
+    """Hash the committed generator source, independent of non-source commits."""
+    import subprocess
+
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise ValueError("Invalid generator SHA")
+    result = subprocess.run(
+        ["git", "rev-parse", f"{sha}:src/kilonova_hunter"],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    tree = result.stdout.strip()
+    if result.returncode or len(tree) != 40:
+        raise ValueError("Generator source tree unavailable")
+    return tree
+
+
+def _score_receipt(folder: Path, maps: dict) -> dict:
+    from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
+    from kilonova_hunter.sample import _cache_paths
+
+    sha = _score_generator_sha()
+    return {
+        "generator_sha": sha,
+        "generator_source_tree": _score_source_tree(sha),
+        "diffusion_fix": DIFFUSION_FIX_ID,
+        "dust_mode": "sfd",
+        **maps,
+        "test_set_hashes": {p.name: _score_file_hash(p) for p in _cache_paths(folder)},
+    }
+
+
+def _verify_score_receipt(folder: Path) -> dict:
+    """Receipts bind a fresh CLI build to its code, maps and exact cache bytes."""
+    import json
+
+    try:
+        receipt = json.loads((folder / "score_provenance.json").read_text())
+        expected = _score_receipt(folder, _score_map_provenance())
+        recorded_sha = receipt.get("generator_sha", "")
+        if _score_source_tree(recorded_sha) != expected["generator_source_tree"]:
+            raise ValueError("Generator source changed")
+        expected["generator_sha"] = recorded_sha
+        if receipt != expected:
+            raise ValueError("missing, stale or mismatched provenance fields/hashes")
+    except (OSError, ValueError) as error:
+        _fail(f"Cache provenance refused for {folder}: {error}. Nothing consumed.")
+    return receipt
+
+
+def _rebuild_score_cache(cache: Path) -> None:
+    """No reuse: frozen generators and defaults, in an exclusively new directory.
+
+    A failed build has no usable receipts. This only builds; scoring requires
+    a separate invocation, retaining the ordinary score-once checks.
+    """
+    import inspect
+    import json
+
+    from kilonova_hunter import sky
+    from kilonova_hunter.grid import run_tuning_grid
+    from kilonova_hunter.sample import (
+        LIKE_KIND,
+        REALISTIC,
+        simulate_exact_copies,
+        simulate_population,
+    )
+
+    if cache.exists():
+        _fail(
+            "Rebuild requires a NEW --cache directory; stale caches are never reused."
+        )
+    maps = _score_map_provenance()
+    generator_sha = _score_generator_sha()
+    # Bind the query to these maps, rather than an earlier process-global query.
+    sky._SFD_QUERY = None
+    dust = sky.open_dust_source()
+    if dust.mode != "sfd":
+        _fail("Rebuild requires working SFD dust; no fallback is allowed.")
+    cache.mkdir(parents=True, exist_ok=False)
+    folders = []
+    for population in (LIKE_KIND, REALISTIC):
+        simulate_population(population, "test", dust=dust, cache_dir=cache)
+        folders.append(cache / population / "test")
+    seed = inspect.signature(run_tuning_grid).parameters["copy_seed"].default
+    simulate_exact_copies(dust=dust, cache_dir=cache, seed=seed)
+    folders.append(cache / "at2017gfo-exact" / "copies")
+    if maps != _score_map_provenance():
+        raise ValueError("Dust maps changed during generation; no receipts written")
+    if generator_sha != _score_generator_sha():
+        raise ValueError("Generator changed during generation; no receipts written")
+    for folder in folders:
+        (folder / "score_provenance.json").write_text(
+            json.dumps(_score_receipt(folder, maps), sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _record_score_outcome(
+    identity,
+    numbers,
+    sanity,
+    receipts,
+    copies_receipt,
+    *,
+    status,
+    reason,
+    error=None,
+) -> None:
+    """Persist returned results; pending, FAIL and ERROR attempts stay consumed."""
+    import traceback
+
+    payload = _ledger_payload()
+    entry = payload["sets"][identity][-1]
+    entry.update(
+        {
+            "status": status,
+            "consumed": True,
+            "numbers": {
+                population: numbers.get(
+                    population,
+                    [{"day": day, "result": None} for day in (3.0, 5.0, 7.0)],
+                )
+                for population in receipts
+            },
+            "exception": (
+                {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                    "traceback": "".join(traceback.format_exception(error)),
+                }
+                if error is not None
+                else None
+            ),
+            "sanity": sanity,
+            "fail_reason": reason,
+            "not_computed": {
+                name: "not returned; internal progress unavailable"
+                for name in ("2017-like", "realistic", "sanity")
+                if (sanity is None if name == "sanity" else name not in numbers)
+            },
+        }
+    )
+    for population, receipt in receipts.items():
+        entry["provenance"][population].update(receipt)
+    entry["sanity_provenance"] = copies_receipt
+    _write_ledger(test_set_scored_path(), payload)
 
 
 # Ruling 12(21): the score-once key is the test set's identity. Software
@@ -858,6 +1176,19 @@ def _ledger_hashes() -> set[str]:
     return set(payload.get("sets", {}))
 
 
+def _score_json_values(value):
+    """Undefined ledger values are null; measured zero remains zero."""
+    import math
+
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _score_json_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_score_json_values(item) for item in value]
+    return value
+
+
 def _write_ledger(path: Path, payload: dict) -> None:
     """Replace the ledger atomically. The temp file sits in the same directory."""
     import json
@@ -865,7 +1196,10 @@ def _write_ledger(path: Path, payload: dict) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(_score_json_values(payload), indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     os.replace(temporary, path)
 
 
@@ -968,6 +1302,8 @@ def _write_pending_score(
     git_sha: str,
     scored_at: str,
     decision_id: str | None = None,
+    receipts: dict | None = None,
+    copies_receipt: dict | None = None,
 ) -> None:
     """Append a pending entry before any score file is written.
 
@@ -998,6 +1334,28 @@ def _write_pending_score(
     }
     if decision_id:
         entry["decision_id"] = decision_id
+    if receipts is not None:
+        entry.update(
+            {
+                "consumed": True,
+                "numbers": {
+                    population: [
+                        {"day": day, "result": None} for day in (3.0, 5.0, 7.0)
+                    ]
+                    for population in receipts
+                },
+                "exception": None,
+                "sanity": None,
+                "not_computed": {
+                    name: "not returned; internal progress unavailable"
+                    for name in (*receipts, "sanity")
+                },
+                "fail_reason": "scoring not yet complete",
+                "sanity_provenance": copies_receipt,
+            }
+        )
+        for population, receipt in receipts.items():
+            entry["provenance"][population].update(receipt)
     payload = _ledger_payload()
     entries = _ledger_entries(payload.setdefault("sets", {}).get(test_hash))
     entries.append(entry)
@@ -1016,13 +1374,14 @@ def _complete_pending_score(test_hash: str, score_path: Path) -> None:
 
     payload = _ledger_payload()
     entries = _ledger_entries(payload.get("sets", {}).get(test_hash))
-    if not entries or entries[-1].get("status") != "pending":
+    if not entries or entries[-1].get("status") not in ("pending", "FAIL"):
         _fail(
             "The pending score entry is missing, so the score was not "
             "recorded as complete. Nothing else was changed."
         )
     score_bytes = score_path.read_bytes()
-    entries[-1]["status"] = "complete"
+    if entries[-1]["status"] != "FAIL":
+        entries[-1]["status"] = "complete"
     entries[-1]["score_path"] = str(score_path)
     entries[-1]["score_sha256"] = hashlib.sha256(score_bytes).hexdigest()
     payload["sets"][test_hash] = entries
