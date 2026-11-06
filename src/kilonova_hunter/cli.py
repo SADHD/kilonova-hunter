@@ -196,6 +196,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     recall.add_argument(
+        "--rebuild-score-cache",
+        action="store_true",
+        help=(
+            "With --score-test, rebuild using the frozen generators into a new "
+            "--cache directory, write integrity receipts, and stop WITHOUT scoring."
+        ),
+    )
+    recall.add_argument(
         "--cuts",
         type=Path,
         default=None,
@@ -458,7 +466,7 @@ def _run_fetch_alerts(output: Path, start: str, stop: str, cuts: Path | None) ->
 
 
 def _run_score_test(args) -> None:
-    """Score the cached test split once. Refuses to simulate or to retune.
+    """Score an attested cache once, or rebuild separately without scoring.
 
     The command stops unless the cuts file is frozen and the cache
     manifest names the SFD dust map. A pending ledger entry counts as
@@ -506,8 +514,13 @@ def _run_score_test(args) -> None:
     except (TypeError, ValueError):
         _fail("Each cut in the cuts file must be a finite number. Nothing was written.")
     cache = Path(args.cache)
+    if getattr(args, "rebuild_score_cache", False):
+        _rebuild_score_cache(cache)
+        print("Rebuilt cache with integrity receipts; no scoring or consumption.")
+        return
     expected_map = dust_map_label()
     loaded_sets = []
+    loaded_hashes = {}
     for population in (LIKE_KIND, REALISTIC):
         folder = cache / population / "test"
         manifest_path, events_path, curves_path = _cache_paths(folder)
@@ -530,6 +543,10 @@ def _run_score_test(args) -> None:
                 "Simulate it before scoring. This command does not simulate."
             )
         try:
+            loaded_hashes[population] = {
+                path.name: _score_file_hash(path)
+                for path in (manifest_path, events_path, curves_path)
+            }
             loaded = _read_cache(folder)
         except ValueError as error:
             _fail(f"{error} Nothing was written.")
@@ -580,6 +597,14 @@ def _run_score_test(args) -> None:
                     f"dust_map is {manifest.get('dust_map')!r}. "
                     f"It has to be {expected_map!r}."
                 )
+        receipts = {
+            population: _verify_score_receipt(cache / population / "test")
+            for population, *_ in loaded_sets
+        }
+        for population, receipt in receipts.items():
+            if receipt.get("test_set_hashes") != loaded_hashes[population]:
+                _fail("Cache changed while loading; nothing was consumed.")
+        copies_receipt, copies_loaded = _verified_score_copies(cache)
         _write_pending_score(
             identity,
             combo,
@@ -587,28 +612,247 @@ def _run_score_test(args) -> None:
             git_sha=_git_sha(),
             scored_at=_scored_at(),
             decision_id=decision_id,
+            receipts=receipts,
+            copies_receipt=copies_receipt,
         )
-        _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
         by_population = {}
-        for population, manifest, events, curves in loaded_sets:
-            by_population[population] = score_with_frozen_cuts(
-                events,
-                curves,
-                combo,
-                population=population,
-                status=str(manifest.get("status", "ready")),
+        sanity = None
+        failure = None
+        try:
+            _claim_score_once_marker(loaded_sets, combo, decision_id=decision_id)
+            for population, manifest, events, curves in loaded_sets:
+                by_population[population] = score_with_frozen_cuts(
+                    events,
+                    curves,
+                    combo,
+                    population=population,
+                    status=str(manifest.get("status", "ready")),
+                )
+                _record_score_outcome(
+                    identity,
+                    by_population,
+                    sanity,
+                    receipts,
+                    copies_receipt,
+                    status="pending",
+                    reason="remaining computations not complete",
+                )
+            from kilonova_hunter.grid import (
+                caught_not_judgeable_blocks,
+                copy_sign_off,
+                score_exact_copies,
             )
-        text = format_test_score(
-            by_population,
-            dry_run=False,
-            provisional=bool(cuts.get("provisional", False)),
-        )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text + "\n", encoding="utf-8")
-        _complete_pending_score(identity, destination)
+
+            sanity = score_exact_copies(copies_loaded[1], copies_loaded[2], combo)
+            reasons = []
+            if any(
+                caught_not_judgeable_blocks(rows) for rows in by_population.values()
+            ):
+                reasons.append("rule 5: caught-but-not-judgeable is nonzero")
+            blocked, copy_status = copy_sign_off(sanity)
+            if blocked:
+                reasons.append(f"sanity {copy_status}")
+            # Persist numbers before formatting or writing the report can fail.
+            failure = "; ".join(reasons) or None
+            _record_score_outcome(
+                identity,
+                by_population,
+                sanity,
+                receipts,
+                copies_receipt,
+                status="FAIL" if failure else "pending",
+                reason=failure,
+            )
+            text = format_test_score(
+                by_population,
+                dry_run=False,
+                provisional=bool(cuts.get("provisional", False)),
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text + "\n", encoding="utf-8")
+            _complete_pending_score(identity, destination)
+            print(text)
+            if failure:
+                raise SystemExit(2)
+            _record_score_outcome(
+                identity,
+                by_population,
+                sanity,
+                receipts,
+                copies_receipt,
+                status="complete",
+                reason=None,
+            )
+        except BaseException as error:
+            reason = f"{type(error).__name__}: {error}"
+            _record_score_outcome(
+                identity,
+                by_population,
+                sanity,
+                receipts,
+                copies_receipt,
+                status="FAIL",
+                reason=f"{failure}; {reason}" if failure else reason,
+            )
+            raise
     finally:
         _release_score_lock(lock)
-    print(text)
+
+
+def _score_file_hash(path: Path) -> str:
+    import hashlib
+
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def _verified_score_copies(cache: Path):
+    from kilonova_hunter.sample import _read_cache
+
+    folder = cache / "at2017gfo-exact" / "copies"
+    receipt = _verify_score_receipt(folder)
+    loaded = _read_cache(folder)
+    if loaded is None:
+        _fail("No attested sanity copies; nothing was consumed.")
+    if receipt != _verify_score_receipt(folder):
+        _fail("Sanity cache changed while loading; nothing was consumed.")
+    return receipt, loaded
+
+
+def _score_map_provenance() -> dict:
+    from kilonova_hunter.sky import sfd_directory
+
+    folder = sfd_directory().resolve(strict=True)
+    hashes = {
+        name: _score_file_hash(folder / name)
+        for name in ("SFD_dust_4096_ngp.fits", "SFD_dust_4096_sgp.fits")
+    }
+    return {"dust_map_path": str(folder), "dust_map_hashes": hashes}
+
+
+def _score_generator_sha() -> str:
+    """A commit id only attests the generator when its source is unchanged."""
+    import subprocess
+
+    sha = _git_sha()
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        raise ValueError("No generator SHA available")
+    result = subprocess.run(
+        ["git", "diff", "--quiet", sha, "--", "src/kilonova_hunter"],
+        cwd=_repo_root(),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError("Generator source differs from its recorded commit")
+    return sha
+
+
+def _score_receipt(folder: Path, maps: dict) -> dict:
+    from kilonova_hunter.redback_fix import DIFFUSION_FIX_ID
+    from kilonova_hunter.sample import _cache_paths
+
+    return {
+        "generator_sha": _score_generator_sha(),
+        "diffusion_fix": DIFFUSION_FIX_ID,
+        "dust_mode": "sfd",
+        **maps,
+        "test_set_hashes": {p.name: _score_file_hash(p) for p in _cache_paths(folder)},
+    }
+
+
+def _verify_score_receipt(folder: Path) -> dict:
+    """Receipts bind a fresh CLI build to its code, maps and exact cache bytes."""
+    import json
+
+    try:
+        receipt = json.loads((folder / "score_provenance.json").read_text())
+        expected = _score_receipt(folder, _score_map_provenance())
+        if receipt != expected:
+            raise ValueError("missing, stale or mismatched provenance fields/hashes")
+    except (OSError, ValueError) as error:
+        _fail(f"Cache provenance refused for {folder}: {error}. Nothing consumed.")
+    return receipt
+
+
+def _rebuild_score_cache(cache: Path) -> None:
+    """No reuse: frozen generators and defaults, in an exclusively new directory.
+
+    A failed build has no usable receipts. This only builds; scoring requires
+    a separate invocation, retaining the ordinary score-once checks.
+    """
+    import inspect
+    import json
+
+    from kilonova_hunter import sky
+    from kilonova_hunter.grid import run_tuning_grid
+    from kilonova_hunter.sample import (
+        LIKE_KIND,
+        REALISTIC,
+        simulate_exact_copies,
+        simulate_population,
+    )
+
+    if cache.exists():
+        _fail(
+            "Rebuild requires a NEW --cache directory; stale caches are never reused."
+        )
+    maps = _score_map_provenance()
+    generator_sha = _score_generator_sha()
+    # Bind the query to these maps, rather than an earlier process-global query.
+    sky._SFD_QUERY = None
+    dust = sky.open_dust_source()
+    if dust.mode != "sfd":
+        _fail("Rebuild requires working SFD dust; no fallback is allowed.")
+    cache.mkdir(parents=True, exist_ok=False)
+    folders = []
+    for population in (LIKE_KIND, REALISTIC):
+        simulate_population(population, "test", dust=dust, cache_dir=cache)
+        folders.append(cache / population / "test")
+    seed = inspect.signature(run_tuning_grid).parameters["copy_seed"].default
+    simulate_exact_copies(dust=dust, cache_dir=cache, seed=seed)
+    folders.append(cache / "at2017gfo-exact" / "copies")
+    if maps != _score_map_provenance():
+        raise ValueError("Dust maps changed during generation; no receipts written")
+    if generator_sha != _score_generator_sha():
+        raise ValueError("Generator changed during generation; no receipts written")
+    for folder in folders:
+        (folder / "score_provenance.json").write_text(
+            json.dumps(_score_receipt(folder, maps), sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _record_score_outcome(
+    identity,
+    numbers,
+    sanity,
+    receipts,
+    copies_receipt,
+    *,
+    status,
+    reason,
+) -> None:
+    """Update only this run's last entry; pending/FAIL entries remain consumed."""
+    payload = _ledger_payload()
+    entry = payload["sets"][identity][-1]
+    entry.update(
+        {
+            "status": status,
+            "consumed": True,
+            "numbers": numbers,
+            "sanity": sanity,
+            "fail_reason": reason,
+            "not_computed": {
+                name: "not computed before termination"
+                for name in ("2017-like", "realistic", "sanity")
+                if (sanity is None if name == "sanity" else name not in numbers)
+            },
+        }
+    )
+    for population, receipt in receipts.items():
+        entry["provenance"][population].update(receipt)
+    entry["sanity_provenance"] = copies_receipt
+    _write_ledger(test_set_scored_path(), payload)
 
 
 # Ruling 12(21): the score-once key is the test set's identity. Software
@@ -968,6 +1212,8 @@ def _write_pending_score(
     git_sha: str,
     scored_at: str,
     decision_id: str | None = None,
+    receipts: dict | None = None,
+    copies_receipt: dict | None = None,
 ) -> None:
     """Append a pending entry before any score file is written.
 
@@ -998,6 +1244,22 @@ def _write_pending_score(
     }
     if decision_id:
         entry["decision_id"] = decision_id
+    if receipts is not None:
+        entry.update(
+            {
+                "consumed": True,
+                "numbers": {},
+                "sanity": None,
+                "not_computed": {
+                    name: "not computed before termination"
+                    for name in (*receipts, "sanity")
+                },
+                "fail_reason": "scoring not yet complete",
+                "sanity_provenance": copies_receipt,
+            }
+        )
+        for population, receipt in receipts.items():
+            entry["provenance"][population].update(receipt)
     payload = _ledger_payload()
     entries = _ledger_entries(payload.setdefault("sets", {}).get(test_hash))
     entries.append(entry)
@@ -1016,13 +1278,14 @@ def _complete_pending_score(test_hash: str, score_path: Path) -> None:
 
     payload = _ledger_payload()
     entries = _ledger_entries(payload.get("sets", {}).get(test_hash))
-    if not entries or entries[-1].get("status") != "pending":
+    if not entries or entries[-1].get("status") not in ("pending", "FAIL"):
         _fail(
             "The pending score entry is missing, so the score was not "
             "recorded as complete. Nothing else was changed."
         )
     score_bytes = score_path.read_bytes()
-    entries[-1]["status"] = "complete"
+    if entries[-1]["status"] != "FAIL":
+        entries[-1]["status"] = "complete"
     entries[-1]["score_path"] = str(score_path)
     entries[-1]["score_sha256"] = hashlib.sha256(score_bytes).hexdigest()
     payload["sets"][test_hash] = entries
